@@ -22,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.connectit.android.model.DiscoveredDevice
+import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.service.ConnectItService
 import com.connectit.android.service.ConnectionUiState
 import com.connectit.android.ui.components.ConnectionRequestDialog
@@ -30,15 +31,23 @@ import com.connectit.android.ui.components.FolderOfferDialog
 import com.connectit.android.ui.screens.ConnectedScreen
 import com.connectit.android.ui.screens.DevicesScreen
 import com.connectit.android.ui.screens.SettingsScreen
+import com.connectit.android.ui.screens.VideoPlayerScreen
 import com.connectit.android.ui.screens.VideoScreen
-import com.connectit.android.ui.screens.VideoWebViewScreen
+import com.connectit.android.ui.screens.VideoServerScreen
 
 private enum class AppTab(val label: String) { DEVICES("裝置"), VIDEO("影片"), SETTINGS("設定") }
+
+/** 「影片」頁的子導覽:選伺服器 -> 看清單(向對方要 manifest)-> 播放。 */
+private sealed interface VideoNav {
+    data object Root : VideoNav
+    data class Manifest(val server: DiscoveredDevice) : VideoNav
+    data class Player(val server: DiscoveredDevice, val entries: List<VideoManifestEntry>, val startIndex: Int) : VideoNav
+}
 
 @Composable
 fun ConnectItApp(service: ConnectItService) {
     var tab by remember { mutableStateOf(AppTab.DEVICES) }
-    var watchingServer by remember { mutableStateOf<DiscoveredDevice?>(null) }
+    var videoNav by remember { mutableStateOf<VideoNav>(VideoNav.Root) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     val connectionState by service.connectionState.collectAsState()
@@ -50,10 +59,25 @@ fun ConnectItApp(service: ConnectItService) {
         service.events.collect { message -> snackbarHostState.showSnackbar(message) }
     }
 
-    val watching = watchingServer
-    if (watching != null) {
-        VideoWebViewScreen(server = watching, onBack = { watchingServer = null })
-        return
+    when (val nav = videoNav) {
+        is VideoNav.Manifest -> {
+            VideoServerScreen(
+                server = nav.server,
+                onBack = { videoNav = VideoNav.Root },
+                onPlay = { entries, startIndex -> videoNav = VideoNav.Player(nav.server, entries, startIndex) },
+            )
+            return
+        }
+        is VideoNav.Player -> {
+            VideoPlayerScreen(
+                server = nav.server,
+                entries = nav.entries,
+                startIndex = nav.startIndex,
+                onBack = { videoNav = VideoNav.Manifest(nav.server) },
+            )
+            return
+        }
+        VideoNav.Root -> Unit
     }
 
     Scaffold(
@@ -91,7 +115,11 @@ fun ConnectItApp(service: ConnectItService) {
                     DevicesScreen(service = service, modifier = contentModifier)
                 }
             }
-            AppTab.VIDEO -> VideoScreen(service = service, modifier = contentModifier, onWatch = { watchingServer = it })
+            AppTab.VIDEO -> VideoScreen(
+                service = service,
+                modifier = contentModifier,
+                onWatch = { server -> videoNav = VideoNav.Manifest(server) },
+            )
             AppTab.SETTINGS -> SettingsScreen(service = service, modifier = contentModifier)
         }
     }
