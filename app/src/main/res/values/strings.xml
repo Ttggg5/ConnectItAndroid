@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">ConnectIt</string>
+    <string name="notification_channel_name">ConnectIt 背景服務</string>
+    <string name="notification_running">ConnectIt 正在背景執行,持續搜尋與監聽連線</string>
+</resources>
