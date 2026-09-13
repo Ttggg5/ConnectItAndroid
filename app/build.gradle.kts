@@ -30,7 +30,10 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
-        freeCompilerArgs += listOf("-opt-in=androidx.compose.material3.ExperimentalMaterial3Api")
+        freeCompilerArgs += listOf(
+            "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
+            "-opt-in=androidx.compose.foundation.layout.ExperimentalLayoutApi",
+        )
     }
 
     buildFeatures {
@@ -61,6 +64,14 @@ dependencies {
 
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.documentfile:documentfile:1.0.1")
+
+    // 原生播放器,取代 WebView 播放 <video>(在真機上會有聲音正常但畫面全黑的相容性問題,
+    // WebChromeClient 也無法解決)。ExoPlayer 搭配 TextureView 合成畫面就不會踩到這個問題。
+    implementation("androidx.media3:media3-exoplayer:1.5.0")
+    implementation("androidx.media3:media3-ui:1.5.0")
+
+    // 影片清單的縮圖載入/快取。
+    implementation("io.coil-kt:coil-compose:2.7.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 

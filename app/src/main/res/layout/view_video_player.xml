@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    surface_type 只能透過 XML 屬性設定,拿掉預設的 SurfaceView 改用 TextureView 呈現畫面:
+    SurfaceView 會在系統視窗上「打洞」合成,跟 Compose 用 RenderNode 合成畫面的方式衝突,
+    嵌在 Compose 的 AndroidView 裡常常畫面全黑(WebView 播放 <video> 也踩過同一類問題)。
+    TextureView 是用一般的紋理合成,能正常疊進 Compose 的畫面裡。
+
+    use_controller 關掉:播放控制列(進度條、播放/暫停、排序、記住進度、自動播放下一部等)
+    整組都用 Compose 自己刻,對應 Windows 觀看頁的播放器介面,這裡只負責畫影片畫面本身。
+-->
+<androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/player_view"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000"
+    android:keepScreenOn="true"
+    app:surface_type="texture_view"
+    app:use_controller="false" />
