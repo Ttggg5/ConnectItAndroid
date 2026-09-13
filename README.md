@@ -2,7 +2,7 @@
 
 Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManager`)廣播/搜尋裝置,
 跟 Windows 端走同一套 TCP 交握協定與訊框協定,可以互相探索、互相連線、傳送檔案/資料夾;
-另外「影片」頁可以搜尋 Windows 端開啟的影片伺服器,並用原生播放器(Media3/ExoPlayer)觀看。
+另外「影片」頁可以搜尋 Windows 端開啟的影片伺服器,並用內嵌瀏覽器(WebView)觀看。
 
 ## 跟 Windows 端的協定對應
 
@@ -15,16 +15,15 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
 - **檔案/資料夾傳輸**:連線建立後,同一個 socket 改用長度前綴的二進位訊框協定(控制訊息 JSON
   / 檔案內容區塊),與 Windows 端 `ConnectionService.cs` 逐行對應,詳見
   `app/src/main/java/com/connectit/android/connection/ConnectionEngine.kt` 開頭的註解。
-- **影片觀看**:Android 端目前只作為**觀看端**——搜尋到 Windows 端開的影片伺服器後,自己
-  呼叫 `GET /manifest` 拿影片清單、`GET /thumbnail/{path}` 拿縮圖,畫一個原生的清單頁,點下去
-  用 Media3(ExoPlayer)播放 `GET /media/{path}`(支援 HTTP Range,可以拖曳進度)。清單裡全部
-  影片會一次排進播放清單,播放頁的上一部/下一部按鈕是 ExoPlayer 內建控制列自動生成的。
-  原本是用內嵌 WebView 直接開伺服器端提供的網頁(首頁清單/觀看頁/播放器完全不用自己刻),
-  但 WebView 內嵌在 Compose 的 `AndroidView` 裡播放 `<video>` 時有已知的相容性問題(聲音正常
-  但畫面全黑,在真機上也重現),改用 ExoPlayer + `TextureView`(見
-  `res/layout/view_video_player.xml` 的 `surface_type="texture_view"`)才能正常顯示畫面——
-  預設的 `SurfaceView` 會在系統視窗上打洞合成,跟 Compose 用 RenderNode 合成畫面的方式衝突。
-  還沒有實作「從手機分享影片給別人看」的功能(Windows 端獨有)。
+- **影片觀看**:Android 端目前只作為**觀看端**——搜尋到 Windows 端開的影片伺服器後,直接用
+  `WebView` 開啟對方提供的網站(首頁清單、觀看頁、播放器/排序/記住播放進度與音量/自動播放
+  下一部完全是伺服器端網頁自己做的,Android 端不用重刻)。
+  **已知限制**:WebView 內嵌在 Compose 的 `AndroidView` 裡播放 `<video>` 時,在部分裝置上
+  (實測過一台 Pixel 8)會出現「聲音正常但畫面全黑」的相容性問題,`setLayerType(HARDWARE)`
+  也無法解決;這是刻意接受的取捨,用來換取跟 Windows 網頁版一致的完整播放器功能。專案 git
+  歷史裡的 commit `b017a7a` 曾經改用 Media3(ExoPlayer)+ `TextureView` 原生播放來繞開這個
+  問題(不會有黑畫面,但排序/記住進度等網頁版功能都得自己重刻),需要的話可以參考那次的做法
+  換回來。還沒有實作「從手機分享影片給別人看」的功能(Windows 端獨有)。
 
 ## 專案結構
 
@@ -37,9 +36,7 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
 | `repo/SettingsRepository.kt` | 裝置名稱、主題設定(DataStore Preferences) |
 | `util/SafUtils.kt` | Storage Access Framework 輔助(查詢檔名/大小、遞迴列出資料夾內容) |
 | `util/DownloadStorage.kt` | 接收檔案落地到公用 `Download/ConnectIt` 資料夾(API 29+ 用 MediaStore.Downloads,API 26-28 退回傳統檔案路徑) |
-| `net/VideoManifestClient.kt` | 向影片伺服器要 `/manifest` 清單、組 `/media/`、`/thumbnail/` 的網址 |
-| `ui/screens/VideoServerScreen.kt` | 影片清單頁(縮圖用 Coil 載入) |
-| `ui/screens/VideoPlayerScreen.kt` | 原生播放頁(Media3 ExoPlayer + TextureView) |
+| `ui/screens/VideoWebViewScreen.kt` | 用 WebView 開啟對方影片伺服器的網站 |
 | `ui/` | Jetpack Compose 畫面(裝置、已連線、影片、設定) |
 
 ## 跟 Windows 端的差異(刻意簡化之處)
@@ -48,9 +45,6 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
 - **搜尋秒數設定**沒有對應項目:Windows 端要定期重送 mDNS 查詢是 Makaretu.Dns 函式庫的保險機制,
   Android 的 `NsdManager` 本身就是持續推播 `onServiceFound`/`onServiceLost`,不需要手動重複查詢。
 - Android 端不提供「影片伺服器」(分享手機裡的影片給別人看)功能,只能搜尋/觀看別人開的。
-- 影片清單固定用檔名排序(對應 Windows 網頁預設的排序方式),沒有做 Windows 網頁上可切換
-  檔名/大小/修改時間、遞增/遞減的排序選單;也沒有記住播放進度/音量、自動播放下一部這些
-  Windows 觀看頁 JavaScript 做的細節。
 
 ## 建置與執行
 

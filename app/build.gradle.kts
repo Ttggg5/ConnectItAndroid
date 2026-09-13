@@ -62,15 +62,6 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.documentfile:documentfile:1.0.1")
 
-    // 原生播放器(取代 WebView 播放 <video>——WebView 內嵌在 Compose 的 AndroidView 裡播放影片
-    // 時有已知的相容性問題,聲音正常但畫面全黑,在真機上也會發生;ExoPlayer 用 TextureView
-    // 合成畫面,不會踩到 WebView 內部影片解碼表面的合成問題)。
-    implementation("androidx.media3:media3-exoplayer:1.5.0")
-    implementation("androidx.media3:media3-ui:1.5.0")
-
-    // 影片首頁清單的縮圖載入/快取。
-    implementation("io.coil-kt:coil-compose:2.7.0")
-
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")
