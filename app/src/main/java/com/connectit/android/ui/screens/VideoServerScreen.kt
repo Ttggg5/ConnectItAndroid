@@ -38,6 +38,7 @@ import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.model.VideoManifestResponse
 import com.connectit.android.net.fetchVideoManifest
 import com.connectit.android.net.videoThumbnailUrl
+import com.connectit.android.ui.components.AdaptiveContentWidth
 
 private sealed interface ManifestState {
     data object Loading : ManifestState
@@ -81,32 +82,34 @@ fun VideoServerScreen(
             }
             is ManifestState.Loaded -> {
                 val entries = current.response.entries.sortedBy { it.name.lowercase() }
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize().padding(padding),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(16.dp),
-                ) {
-                    items(entries, key = { it.relativePath }) { entry ->
-                        val index = entries.indexOf(entry)
-                        Card(modifier = Modifier.fillMaxWidth(), onClick = { onPlay(entries, index) }) {
-                            Column {
-                                Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
-                                    AsyncImage(
-                                        model = videoThumbnailUrl(server.host, server.port, entry.relativePath),
-                                        contentDescription = null,
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop,
-                                    )
-                                    Icon(
-                                        Icons.Filled.PlayCircle,
-                                        contentDescription = "播放",
-                                        modifier = Modifier.align(Alignment.Center),
-                                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                                    )
-                                }
-                                Column(modifier = Modifier.padding(12.dp)) {
-                                    Text(entry.name, style = MaterialTheme.typography.titleSmall, maxLines = 2)
-                                    Text(formatBytes(entry.size), style = MaterialTheme.typography.bodySmall)
+                AdaptiveContentWidth(modifier = Modifier.padding(padding)) {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        contentPadding = PaddingValues(16.dp),
+                    ) {
+                        items(entries, key = { it.relativePath }) { entry ->
+                            val index = entries.indexOf(entry)
+                            Card(modifier = Modifier.fillMaxWidth(), onClick = { onPlay(entries, index) }) {
+                                Column {
+                                    Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
+                                        AsyncImage(
+                                            model = videoThumbnailUrl(server.host, server.port, entry.relativePath),
+                                            contentDescription = null,
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Crop,
+                                        )
+                                        Icon(
+                                            Icons.Filled.PlayCircle,
+                                            contentDescription = "播放",
+                                            modifier = Modifier.align(Alignment.Center),
+                                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                        )
+                                    }
+                                    Column(modifier = Modifier.padding(12.dp)) {
+                                        Text(entry.name, style = MaterialTheme.typography.titleSmall, maxLines = 2)
+                                        Text(formatBytes(entry.size), style = MaterialTheme.typography.bodySmall)
+                                    }
                                 }
                             }
                         }

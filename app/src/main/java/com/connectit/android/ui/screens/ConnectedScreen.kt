@@ -28,6 +28,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.connectit.android.model.ConnectedPeer
 import com.connectit.android.service.ConnectItService
+import com.connectit.android.ui.components.AdaptiveContentWidth
 import com.connectit.android.util.SafUtils
 
 @Composable
@@ -54,8 +55,9 @@ fun ConnectedScreen(service: ConnectItService, peer: ConnectedPeer, modifier: Mo
         modifier = modifier,
         topBar = { TopAppBar(title = { Text(peer.name) }) },
     ) { padding ->
+        AdaptiveContentWidth(modifier = Modifier.padding(padding)) {
         Column(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
+            modifier = Modifier.fillMaxSize().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text("已連線裝置:${peer.name}(${peer.address})")
@@ -87,6 +89,7 @@ fun ConnectedScreen(service: ConnectItService, peer: ConnectedPeer, modifier: Mo
                 Icon(Icons.Filled.LinkOff, contentDescription = null)
                 Text(" 中斷連線")
             }
+        }
         }
     }
 }

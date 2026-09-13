@@ -30,6 +30,7 @@ import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.repo.AppSettings
 import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.service.ConnectItService
+import com.connectit.android.ui.components.AdaptiveContentWidth
 
 @Composable
 fun DevicesScreen(service: ConnectItService, modifier: Modifier = Modifier) {
@@ -61,13 +62,15 @@ fun DevicesScreen(service: ConnectItService, modifier: Modifier = Modifier) {
             return@Scaffold
         }
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(16.dp),
-        ) {
-            items(devices, key = { it.key }) { device ->
-                DeviceCard(device = device, onConnect = { service.connectTo(device, settings.deviceName) })
+        AdaptiveContentWidth(modifier = Modifier.padding(padding)) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(16.dp),
+            ) {
+                items(devices, key = { it.key }) { device ->
+                    DeviceCard(device = device, onConnect = { service.connectTo(device, settings.deviceName) })
+                }
             }
         }
     }

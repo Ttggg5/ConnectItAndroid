@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import com.connectit.android.repo.AppSettings
 import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.service.ConnectItService
+import com.connectit.android.ui.components.AdaptiveContentWidth
 import kotlinx.coroutines.launch
 
 @Composable
@@ -54,10 +55,10 @@ fun SettingsScreen(service: ConnectItService, modifier: Modifier = Modifier) {
         modifier = modifier,
         topBar = { TopAppBar(title = { Text("設定") }) },
     ) { padding ->
+        AdaptiveContentWidth(modifier = Modifier.padding(padding)) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
                 .padding(16.dp)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -110,6 +111,7 @@ fun SettingsScreen(service: ConnectItService, modifier: Modifier = Modifier) {
             }) {
                 Text("停止背景服務並結束")
             }
+        }
         }
     }
 }

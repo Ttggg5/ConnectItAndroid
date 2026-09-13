@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.service.ConnectItService
+import com.connectit.android.ui.components.AdaptiveContentWidth
 
 @Composable
 fun VideoScreen(service: ConnectItService, modifier: Modifier = Modifier, onWatch: (DiscoveredDevice) -> Unit) {
@@ -45,18 +46,20 @@ fun VideoScreen(service: ConnectItService, modifier: Modifier = Modifier, onWatc
             return@Scaffold
         }
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(16.dp),
-        ) {
-            items(servers, key = { it.key }) { server ->
-                Card(modifier = Modifier.fillMaxWidth(), onClick = { onWatch(server) }) {
-                    ListItem(
-                        headlineContent = { Text(server.displayName) },
-                        supportingContent = { Text("${server.host}:${server.port}") },
-                        leadingContent = { Icon(Icons.Filled.PlayCircle, contentDescription = "觀看") },
-                    )
+        AdaptiveContentWidth(modifier = Modifier.padding(padding)) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(16.dp),
+            ) {
+                items(servers, key = { it.key }) { server ->
+                    Card(modifier = Modifier.fillMaxWidth(), onClick = { onWatch(server) }) {
+                        ListItem(
+                            headlineContent = { Text(server.displayName) },
+                            supportingContent = { Text("${server.host}:${server.port}") },
+                            leadingContent = { Icon(Icons.Filled.PlayCircle, contentDescription = "觀看") },
+                        )
+                    }
                 }
             }
         }

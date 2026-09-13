@@ -1,6 +1,12 @@
 package com.connectit.android.ui
 
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.collectAsState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Devices
@@ -9,6 +15,8 @@ import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
@@ -21,10 +29,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.service.ConnectItService
 import com.connectit.android.service.ConnectionUiState
+import com.connectit.android.ui.components.AdaptiveNavigationBreakpoint
 import com.connectit.android.ui.components.ConnectionRequestDialog
 import com.connectit.android.ui.screens.ConnectedScreen
 import com.connectit.android.ui.screens.DevicesScreen
@@ -34,6 +44,12 @@ import com.connectit.android.ui.screens.VideoScreen
 import com.connectit.android.ui.screens.VideoServerScreen
 
 private enum class AppTab(val label: String) { DEVICES("裝置"), VIDEO("影片"), SETTINGS("設定") }
+
+/** Material 預設的 NavigationRail 只有 80dp 寬,圖示和文字標籤會擠在一起;加寬一點比較好按、好讀。 */
+private val RailWidth = 120.dp
+
+/** 側邊導覽列變寬後,預設 24dp 的圖示顯得太小,加大一點跟加寬的欄位比例更協調。 */
+private val RailIconSize = 32.dp
 
 /** 「影片」頁的子導覽:選伺服器 -> 看清單(向對方要 manifest)-> 播放。 */
 private sealed interface VideoNav {
@@ -76,30 +92,91 @@ fun ConnectItApp(service: ConnectItService) {
         VideoNav.Root -> Unit
     }
 
-    Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) { data -> Snackbar(snackbarData = data) } },
-        bottomBar = {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = tab == AppTab.DEVICES,
-                    onClick = { tab = AppTab.DEVICES },
-                    icon = { Icon(Icons.Filled.Devices, contentDescription = null) },
-                    label = { Text(AppTab.DEVICES.label) },
-                )
-                NavigationBarItem(
-                    selected = tab == AppTab.VIDEO,
-                    onClick = { tab = AppTab.VIDEO },
-                    icon = { Icon(Icons.Filled.VideoLibrary, contentDescription = null) },
-                    label = { Text(AppTab.VIDEO.label) },
-                )
-                NavigationBarItem(
-                    selected = tab == AppTab.SETTINGS,
-                    onClick = { tab = AppTab.SETTINGS },
-                    icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
-                    label = { Text(AppTab.SETTINGS.label) },
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        // 折疊機攤開、平板橫向等寬螢幕時改用側邊導覽列——底部導覽列在寬螢幕上會讓左右兩側
+        // 的觸控熱區離拇指太遠,側邊列才是 Material 建議的寬螢幕導覽方式。
+        val useNavRail = maxWidth >= AdaptiveNavigationBreakpoint
+
+        if (useNavRail) {
+            Row(Modifier.fillMaxSize()) {
+                NavigationRail(modifier = Modifier.width(RailWidth).fillMaxHeight()) {
+                    AppTab.entries.forEach { entry ->
+                        NavigationRailItem(
+                            selected = tab == entry,
+                            onClick = { tab = entry },
+                            icon = {
+                                Icon(
+                                    entry.icon(),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(RailIconSize),
+                                )
+                            },
+                            label = { Text(entry.label) },
+                        )
+                    }
+                }
+                MainScaffold(
+                    modifier = Modifier.weight(1f),
+                    tab = tab,
+                    service = service,
+                    connectionState = connectionState,
+                    snackbarHostState = snackbarHostState,
+                    bottomBar = null,
+                    onWatch = { server -> videoNav = VideoNav.Manifest(server) },
                 )
             }
-        },
+        } else {
+            MainScaffold(
+                modifier = Modifier.fillMaxSize(),
+                tab = tab,
+                service = service,
+                connectionState = connectionState,
+                snackbarHostState = snackbarHostState,
+                bottomBar = {
+                    NavigationBar {
+                        AppTab.entries.forEach { entry ->
+                            NavigationBarItem(
+                                selected = tab == entry,
+                                onClick = { tab = entry },
+                                icon = { Icon(entry.icon(), contentDescription = null) },
+                                label = { Text(entry.label) },
+                            )
+                        }
+                    }
+                },
+                onWatch = { server -> videoNav = VideoNav.Manifest(server) },
+            )
+        }
+    }
+
+    pendingConnectionRequest?.let { request ->
+        ConnectionRequestDialog(
+            request = request,
+            onRespond = { accept -> service.respondToConnectionRequest(accept) },
+        )
+    }
+}
+
+private fun AppTab.icon() = when (this) {
+    AppTab.DEVICES -> Icons.Filled.Devices
+    AppTab.VIDEO -> Icons.Filled.VideoLibrary
+    AppTab.SETTINGS -> Icons.Filled.Settings
+}
+
+@Composable
+private fun MainScaffold(
+    modifier: Modifier,
+    tab: AppTab,
+    service: ConnectItService,
+    connectionState: ConnectionUiState,
+    snackbarHostState: SnackbarHostState,
+    bottomBar: (@Composable () -> Unit)?,
+    onWatch: (DiscoveredDevice) -> Unit,
+) {
+    Scaffold(
+        modifier = modifier,
+        snackbarHost = { SnackbarHost(snackbarHostState) { data -> Snackbar(snackbarData = data) } },
+        bottomBar = bottomBar ?: {},
     ) { padding ->
         val contentModifier = Modifier.padding(padding)
         when (tab) {
@@ -114,16 +191,9 @@ fun ConnectItApp(service: ConnectItService) {
             AppTab.VIDEO -> VideoScreen(
                 service = service,
                 modifier = contentModifier,
-                onWatch = { server -> videoNav = VideoNav.Manifest(server) },
+                onWatch = onWatch,
             )
             AppTab.SETTINGS -> SettingsScreen(service = service, modifier = contentModifier)
         }
-    }
-
-    pendingConnectionRequest?.let { request ->
-        ConnectionRequestDialog(
-            request = request,
-            onRespond = { accept -> service.respondToConnectionRequest(accept) },
-        )
     }
 }
