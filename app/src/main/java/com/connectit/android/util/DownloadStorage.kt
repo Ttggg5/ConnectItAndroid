@@ -2,11 +2,13 @@ package com.connectit.android.util
 
 import android.content.ContentResolver
 import android.content.ContentValues
+import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
+import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
@@ -19,18 +21,30 @@ import java.io.OutputStream
  * Android 10(API 29)開始的 scoped storage 底下,一般 App 不能再用純檔案路徑寫公用 Download
  * 資料夾,必須改用 [MediaStore.Downloads] 集合;只有 API 26-28 的舊裝置才退回用傳統檔案路徑
  * (搭配 AndroidManifest 裡宣告到 API 28 為止的 WRITE_EXTERNAL_STORAGE 權限)。
+ *
+ * 使用者也可以在設定頁改用 SAF(Storage Access Framework)選一個任意資料夾當作接收位置
+ * (對應 [customTreeUri]),這種情況不管 API 版本一律走 [createViaSafTree]。
  */
 object DownloadStorage {
     private const val ROOT_FOLDER = "ConnectIt"
 
-    /** 顯示給使用者看的資料夾位置(不含檔名),兩種實作底下實際落地的地方都是同一個。 */
+    /** 顯示給使用者看的預設資料夾位置(不含檔名),兩種實作底下實際落地的地方都是同一個。 */
     const val DISPLAY_ROOT = "Download/$ROOT_FOLDER"
 
     /** [outputStream] 用完務必呼叫 [markComplete](成功)或 [delete](失敗/取消)之一。 */
     class ReceivedFile(val outputStream: OutputStream, val token: Any, val displayPath: String)
 
-    /** [relativeSubDir] 是 Download/ConnectIt 底下的子目錄(用 '/' 分隔的多層路徑皆可),沒有子目錄用空字串。 */
-    fun createFile(resolver: ContentResolver, relativeSubDir: String, fileName: String): ReceivedFile? {
+    /**
+     * [relativeSubDir] 是接收根目錄底下的子目錄(用 '/' 分隔的多層路徑皆可),沒有子目錄用空字串。
+     * [customTreeUri] 非 null 時,改用使用者透過 SAF 選取的資料夾(見 [SafUtils]),忽略預設的
+     * 公用 Download/ConnectIt 位置。
+     */
+    fun createFile(context: Context, relativeSubDir: String, fileName: String, customTreeUri: Uri? = null): ReceivedFile? {
+        if (customTreeUri != null) {
+            return createViaSafTree(context, customTreeUri, relativeSubDir, fileName)
+        }
+
+        val resolver = context.contentResolver
         val relativeDir = buildString {
             append(Environment.DIRECTORY_DOWNLOADS).append('/').append(ROOT_FOLDER)
             if (relativeSubDir.isNotEmpty()) append('/').append(relativeSubDir)
@@ -91,6 +105,42 @@ object DownloadStorage {
         }
 
         return ReceivedFile(FileOutputStream(candidate), candidate, "$relativeDir/${candidate.name}")
+    }
+
+    /** 使用者在設定頁用 SAF 選取的任意資料夾,底下用 [DocumentFile] 依 [relativeSubDir] 逐層建立/尋找子目錄。 */
+    private fun createViaSafTree(context: Context, treeUri: Uri, relativeSubDir: String, fileName: String): ReceivedFile? {
+        var dir = DocumentFile.fromTreeUri(context, treeUri) ?: return null
+        val displaySegments = mutableListOf(SafUtils.displayNameOf(context, treeUri))
+
+        if (relativeSubDir.isNotEmpty()) {
+            for (segment in relativeSubDir.split('/')) {
+                if (segment.isEmpty()) continue
+                dir = dir.findFile(segment)?.takeIf { it.isDirectory } ?: dir.createDirectory(segment) ?: return null
+                displaySegments += segment
+            }
+        }
+
+        val uniqueName = uniqueSafFileName(dir, fileName)
+        val doc = dir.createFile(guessMimeType(fileName), uniqueName) ?: return null
+        val stream = context.contentResolver.openOutputStream(doc.uri) ?: return null
+        displaySegments += doc.name ?: uniqueName
+        return ReceivedFile(stream, doc.uri, displaySegments.joinToString("/"))
+    }
+
+    /** SAF 沒有內建的「檔名重複自動改名」行為,得自己檢查同目錄下是否已有同名檔案。 */
+    private fun uniqueSafFileName(dir: DocumentFile, fileName: String): String {
+        if (dir.findFile(fileName) == null) return fileName
+
+        val dot = fileName.lastIndexOf('.')
+        val base = if (dot > 0) fileName.substring(0, dot) else fileName
+        val ext = if (dot > 0) fileName.substring(dot) else ""
+        var i = 1
+        var candidate: String
+        do {
+            candidate = "$base ($i)$ext"
+            i++
+        } while (dir.findFile(candidate) != null)
+        return candidate
     }
 
     private fun guessMimeType(fileName: String): String {

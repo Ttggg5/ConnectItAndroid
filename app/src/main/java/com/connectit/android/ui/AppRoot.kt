@@ -152,7 +152,7 @@ fun ConnectItApp(service: ConnectItService) {
     pendingConnectionRequest?.let { request ->
         ConnectionRequestDialog(
             request = request,
-            onRespond = { accept -> service.respondToConnectionRequest(accept) },
+            onRespond = { accept, trust -> service.respondToConnectionRequest(accept, trust) },
         )
     }
 }

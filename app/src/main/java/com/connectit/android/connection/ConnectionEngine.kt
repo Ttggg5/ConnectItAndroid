@@ -1,6 +1,7 @@
 package com.connectit.android.connection
 
 import android.content.ContentResolver
+import android.content.Context
 import android.net.Uri
 import com.connectit.android.model.ConnectedPeer
 import com.connectit.android.model.ConnectionRequest
@@ -21,6 +22,7 @@ import com.connectit.android.net.readLine
 import com.connectit.android.net.writeFrame
 import com.connectit.android.net.writeLine
 import com.connectit.android.util.DownloadStorage
+import com.connectit.android.util.SafUtils
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -33,6 +35,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
+import java.io.IOException
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -42,7 +45,7 @@ import java.util.UUID
 
 private const val REQUEST_TIMEOUT_MS = 10_000
 private const val RESPONSE_TIMEOUT_MS = 60_000
-private const val CONNECT_TIMEOUT_MS = 10_000
+private const val DEFAULT_CONNECT_TIMEOUT_MS = 10_000
 
 /**
  * mDNS 找到裝置之後的實際 TCP 連線邏輯:連線請求/接受/拒絕交握,連線建立後的檔案/資料夾
@@ -53,9 +56,17 @@ private const val CONNECT_TIMEOUT_MS = 10_000
  * 持有一個實例並把事件轉接到 UI 可觀察的狀態上。
  */
 class ConnectionEngine(
-    private val contentResolver: ContentResolver,
+    private val context: Context,
     private val scope: CoroutineScope,
 ) {
+    private val contentResolver: ContentResolver get() = context.contentResolver
+
+    /** 主動連線逾時秒數,可從設定頁調整(見 [com.connectit.android.repo.SettingsRepository])。 */
+    @Volatile var connectTimeoutMs: Int = DEFAULT_CONNECT_TIMEOUT_MS
+
+    /** 使用者透過 SAF 選取的自訂接收資料夾,null 代表用預設的公用 Download/ConnectIt 資料夾。 */
+    var customDownloadFolderProvider: () -> Uri? = { null }
+
     var onConnectionRequested: ((ConnectionRequest) -> Unit)? = null
     var onConnected: ((ConnectedPeer) -> Unit)? = null
     var onRemoteDisconnected: (() -> Unit)? = null
@@ -82,7 +93,13 @@ class ConnectionEngine(
 
     suspend fun startListening(preferredPort: Int = 0): Int = withContext(Dispatchers.IO) {
         stopListening()
-        val server = ServerSocket(preferredPort)
+        val server = try {
+            ServerSocket(preferredPort)
+        } catch (e: IOException) {
+            if (preferredPort == 0) throw e
+            onStatusChanged?.invoke("連接埠 $preferredPort 無法使用,已改用系統自動指派的連接埠。")
+            ServerSocket(0)
+        }
         serverSocket = server
         acceptJob = scope.launch(Dispatchers.IO) { acceptLoop(server) }
         onStatusChanged?.invoke("已開始監聽連接埠 ${server.localPort}。")
@@ -171,7 +188,7 @@ class ConnectionEngine(
     ): Boolean = withContext(Dispatchers.IO) {
         val socket = Socket()
         try {
-            socket.connect(InetSocketAddress(address, port), CONNECT_TIMEOUT_MS)
+            socket.connect(InetSocketAddress(address, port), connectTimeoutMs)
             val input = socket.getInputStream()
             val output = socket.getOutputStream()
 
@@ -497,7 +514,7 @@ class ConnectionEngine(
             return
         }
 
-        val received = DownloadStorage.createFile(contentResolver, "", transfer.fileName)
+        val received = DownloadStorage.createFile(context, "", transfer.fileName, customDownloadFolderProvider())
         if (received == null) {
             activeTransfer = null
             launchWrite(FileControlMessage(type = "file-reject", transferId = transferId))
@@ -647,7 +664,7 @@ class ConnectionEngine(
             else -> "$baseSubDir/$subDir"
         }
 
-        val received = DownloadStorage.createFile(contentResolver, combinedSubDir, fileName)
+        val received = DownloadStorage.createFile(context, combinedSubDir, fileName, customDownloadFolderProvider())
         if (received == null) {
             onStatusChanged?.invoke("無法建立檔案。")
             writeControl(FileControlMessage(type = "folder-cancel", transferId = session.folderTransferId))
@@ -702,11 +719,16 @@ class ConnectionEngine(
         )
     }
 
+    /** 顯示用的接收根目錄名稱:有自訂 SAF 資料夾就用它的名稱,否則用預設的 Download/ConnectIt。 */
+    private fun downloadRootDisplayName(): String =
+        customDownloadFolderProvider()?.let { uri -> runCatching { SafUtils.displayNameOf(context, uri) }.getOrNull() }
+            ?: DownloadStorage.DISPLAY_ROOT
+
     private fun handleFolderComplete(message: FileControlMessage) {
         val session = activeFolderSession
         if (session == null || session.direction != TransferDirection.RECEIVING || session.folderTransferId != message.transferId) return
         activeFolderSession = null
-        val displayPath = DownloadStorage.DISPLAY_ROOT + if (session.relativeSubDir.isNullOrEmpty()) "" else "/${session.relativeSubDir}"
+        val displayPath = downloadRootDisplayName() + if (session.relativeSubDir.isNullOrEmpty()) "" else "/${session.relativeSubDir}"
         onFolderTransferEnded?.invoke(
             FolderTransferEnded(
                 session.folderTransferId, TransferDirection.RECEIVING, TransferEndReason.COMPLETED,

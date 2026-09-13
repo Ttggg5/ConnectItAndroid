@@ -50,10 +50,22 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
 
 ## 跟 Windows 端的差異(刻意簡化之處)
 
-- **接收檔案固定存到公用的 `Download/ConnectIt` 資料夾**,不像 Windows 端可以在設定頁自訂任意資料夾。
 - **搜尋秒數設定**沒有對應項目:Windows 端要定期重送 mDNS 查詢是 Makaretu.Dns 函式庫的保險機制,
   Android 的 `NsdManager` 本身就是持續推播 `onServiceFound`/`onServiceLost`,不需要手動重複查詢。
 - Android 端不提供「影片伺服器」(分享手機裡的影片給別人看)功能,只能搜尋/觀看別人開的。
+
+## 設定頁
+
+除了裝置名稱/主題之外,設定頁(`ui/screens/SettingsScreen.kt`,對應資料存在
+`repo/SettingsRepository.kt`)還提供:
+
+- **通知開關**:關閉後,收到檔案/資料夾、對方斷線時不再跳系統通知(連線請求一律會通知,
+  因為那是唯一能提醒使用者去開 App 處理的管道)。
+- **信任的裝置**:收到連線請求時可以勾選「信任此裝置」,之後同名裝置的連線請求會自動接受、
+  不再跳確認對話框;也可以在設定頁移除已信任的裝置。
+- **接收檔案儲存位置**:預設仍是公用的 `Download/ConnectIt` 資料夾,可以改用 SAF
+  (Storage Access Framework)選任意資料夾(見 `util/DownloadStorage.kt` 的 `createViaSafTree`)。
+- **連線設定**:監聽連接埠(留空 = 系統自動指派;變更需要重啟 App 才會生效)與主動連線的逾時秒數。
 
 ## 建置與執行
 

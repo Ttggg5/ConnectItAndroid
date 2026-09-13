@@ -32,8 +32,11 @@ import com.connectit.android.model.FolderEntry
 import com.connectit.android.model.FolderTransferEnded
 import com.connectit.android.model.TransferDirection
 import com.connectit.android.model.TransferEndReason
+import com.connectit.android.repo.AppSettings
+import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.repo.SettingsRepository
 import com.connectit.android.util.DownloadStorage
+import com.connectit.android.util.SafUtils
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -41,6 +44,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -79,8 +83,15 @@ class ConnectItService : LifecycleService() {
     private lateinit var deviceDiscovery: NsdDiscoveryManager
     private lateinit var videoDiscovery: NsdDiscoveryManager
 
+    /** 目前生效的設定快照,由 [onCreate] 裡的收集器持續更新,供不是 Compose 環境的內部邏輯
+     * (通知開關、信任裝置比對、下載資料夾)同步讀取,不用每次都掛一個新的 Flow 收集器。 */
+    @Volatile private var cachedSettings: AppSettings = AppSettings(deviceName = "", themeMode = AppThemeMode.AUTO)
+
     /** 顯示給使用者看的接收檔案位置(見 [com.connectit.android.util.DownloadStorage])。 */
-    val downloadDisplayPath: String = DownloadStorage.DISPLAY_ROOT
+    val downloadDisplayPath: String
+        get() = cachedSettings.customDownloadFolderUri?.let { uriString ->
+            runCatching { SafUtils.displayNameOf(applicationContext, Uri.parse(uriString)) }.getOrNull()
+        } ?: DownloadStorage.DISPLAY_ROOT
 
     private val _devices = MutableStateFlow<List<DiscoveredDevice>>(emptyList())
     val devices: StateFlow<List<DiscoveredDevice>> = _devices.asStateFlow()
@@ -139,15 +150,26 @@ class ConnectItService : LifecycleService() {
         val nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
         deviceDiscovery = NsdDiscoveryManager(nsdManager, NsdDiscoveryManager.DEVICE_SERVICE_TYPE)
         videoDiscovery = NsdDiscoveryManager(nsdManager, NsdDiscoveryManager.VIDEO_SERVICE_TYPE)
-        connectionEngine = ConnectionEngine(contentResolver, lifecycleScope)
+        connectionEngine = ConnectionEngine(applicationContext, lifecycleScope)
+        connectionEngine.customDownloadFolderProvider = { cachedSettings.customDownloadFolderUri?.let(Uri::parse) }
 
         wireCallbacks()
 
         deviceDiscovery.startDiscovery()
         videoDiscovery.startDiscovery()
 
+        // 持續把最新設定快取起來,供上面兩個非 Compose 的用途(通知開關、信任裝置比對)同步讀取,
+        // 並即時套用連線逾時設定的變更。
         lifecycleScope.launch {
-            val port = connectionEngine.startListening()
+            settingsRepository.settings.collect { settings ->
+                cachedSettings = settings
+                connectionEngine.connectTimeoutMs = settings.connectTimeoutSeconds * 1000
+            }
+        }
+
+        lifecycleScope.launch {
+            val preferredPort = settingsRepository.settings.first().preferredPort
+            val port = connectionEngine.startListening(preferredPort)
             settingsRepository.settings.map { it.deviceName }.distinctUntilChanged().collect { name ->
                 deviceDiscovery.advertise(name, port)
             }
@@ -179,10 +201,16 @@ class ConnectItService : LifecycleService() {
         }
     }
 
-    fun respondToConnectionRequest(accept: Boolean) {
-        _pendingConnectionRequest.value?.respond?.invoke(accept)
+    /** [trust] 為 true 時(必須同時 [accept])把這台裝置加入信任清單,之後的連線請求不再詢問。 */
+    fun respondToConnectionRequest(accept: Boolean, trust: Boolean = false) {
+        val request = _pendingConnectionRequest.value
+        request?.respond?.invoke(accept)
         _pendingConnectionRequest.value = null
         clearConnectionRequestNotification()
+
+        if (accept && trust && request != null) {
+            lifecycleScope.launch { settingsRepository.trustDevice(request.requesterName) }
+        }
     }
 
     fun disconnectFromPeer() {
@@ -249,10 +277,16 @@ class ConnectItService : LifecycleService() {
         connectionEngine.onStatusChanged = { pushLog(it) }
 
         connectionEngine.onConnectionRequested = { request ->
-            _pendingConnectionRequest.value = request
-            // 連線請求本身還是要使用者手動接受/拒絕(跟已經同意過的檔案傳輸不同),
-            // 但確認對話框只有 App 開著才看得到,所以額外跳一則通知提醒使用者去開 App 處理。
-            notifyConnectionRequest(request.requesterName)
+            val isTrusted = cachedSettings.trustedDeviceNames.any { it.equals(request.requesterName, ignoreCase = true) }
+            if (isTrusted) {
+                request.respond(true)
+                pushLog("已自動接受信任裝置「${request.requesterName}」的連線請求。")
+            } else {
+                _pendingConnectionRequest.value = request
+                // 連線請求本身還是要使用者手動接受/拒絕(跟已經同意過的檔案傳輸不同),
+                // 但確認對話框只有 App 開著才看得到,所以額外跳一則通知提醒使用者去開 App 處理。
+                notifyConnectionRequest(request.requesterName)
+            }
         }
 
         connectionEngine.onConnected = { peer ->
@@ -260,6 +294,7 @@ class ConnectItService : LifecycleService() {
             clearConnectionRequestNotification()
             _connectionState.value = ConnectionUiState.Connected(peer)
             pushLog("已與 ${peer.name} (${peer.address}) 建立連線。")
+            notifyConnected(peer.name)
         }
 
         connectionEngine.onRemoteDisconnected = {
@@ -439,6 +474,7 @@ class ConnectItService : LifecycleService() {
 
     /** 收到檔案/資料夾提議並自動接受時呼叫,讓使用者(尤其是 App 在背景時)知道現在有東西傳進來。 */
     private fun notifyIncomingTransfer(itemName: String) {
+        if (!cachedSettings.notificationsEnabled) return
         val peerName = (_connectionState.value as? ConnectionUiState.Connected)?.peer?.name
             ?: getString(R.string.notification_incoming_transfer_unknown_peer)
 
@@ -461,8 +497,24 @@ class ConnectItService : LifecycleService() {
         NotificationManagerCompat.from(this).cancel(TRANSFER_NOTIFICATION_ID)
     }
 
+    /** 連線交握完成時呼叫(不論是發起方還是被連線方),讓使用者(尤其是 App 在背景時)知道連線已經建立。 */
+    private fun notifyConnected(peerName: String) {
+        if (!cachedSettings.notificationsEnabled) return
+        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setContentTitle(getString(R.string.notification_connected_title, peerName))
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(mainActivityIntent())
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+
+        postAlertNotification(CONNECTED_NOTIFICATION_ID, notification)
+    }
+
     /** 對方中斷連線時呼叫(非本機主動斷線),讓使用者(尤其是 App 在背景時)知道連線已經斷了。 */
     private fun notifyPeerDisconnected(peerName: String) {
+        if (!cachedSettings.notificationsEnabled) return
         val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
             .setContentTitle(getString(R.string.notification_peer_disconnected_title, peerName))
             .setSmallIcon(R.drawable.ic_notification)
@@ -510,5 +562,6 @@ class ConnectItService : LifecycleService() {
         private const val TRANSFER_NOTIFICATION_ID = 2
         private const val DISCONNECTED_NOTIFICATION_ID = 3
         private const val CONNECTION_REQUEST_NOTIFICATION_ID = 4
+        private const val CONNECTED_NOTIFICATION_ID = 5
     }
 }
