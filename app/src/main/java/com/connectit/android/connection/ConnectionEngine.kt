@@ -24,6 +24,8 @@ import com.connectit.android.util.DownloadStorage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -386,14 +388,55 @@ class ConnectionEngine(
                 val input = transfer.sourceUri?.let { contentResolver.openInputStream(it) }
                     ?: throw java.io.IOException("無法開啟檔案")
                 input.use { stream ->
-                    val buffer = ByteArray(FILE_CHUNK_SIZE)
-                    while (isActive) {
-                        val read = stream.read(buffer)
-                        if (read <= 0) break
-                        writeChunk(buffer, read)
-                        transfer.transferredBytes += read
-                        reportProgress(transfer)
+                    // 讀取檔案(生產者)跟寫入 socket(消費者)用有界 channel 重疊執行,而不是
+                    // 完全循序的「讀一塊→寫一塊」——這樣寫入目前這塊的同時就能開始讀下一塊,
+                    // 內容提供者較慢(例如雲端同步的檔案)時能明顯縮短整體傳輸時間。
+                    // 用固定的一組緩衝區在 freeBuffers/filledChunks 兩個 channel 之間循環,
+                    // 避免每個 chunk 都重新配置一塊 64KB 陣列造成不必要的 GC 壓力。
+                    val bufferCount = 3
+                    val freeBuffers = Channel<ByteArray>(bufferCount)
+                    repeat(bufferCount) { freeBuffers.trySend(ByteArray(FILE_CHUNK_SIZE)) }
+                    val filledChunks = Channel<Pair<ByteArray, Int>>(bufferCount)
+
+                    var readFailure: Throwable? = null
+                    val readJob = launch(Dispatchers.IO) {
+                        try {
+                            while (isActive) {
+                                val buffer = freeBuffers.receive()
+                                val read = try {
+                                    stream.read(buffer)
+                                } catch (e: Exception) {
+                                    freeBuffers.trySend(buffer)
+                                    throw e
+                                }
+                                if (read <= 0) {
+                                    freeBuffers.trySend(buffer)
+                                    break
+                                }
+                                filledChunks.send(buffer to read)
+                            }
+                        } catch (e: CancellationException) {
+                            // 由消費者端(寫入失敗/外層取消)中止,不算讀取失敗。
+                        } catch (e: Exception) {
+                            readFailure = e
+                        } finally {
+                            filledChunks.close()
+                        }
                     }
+
+                    try {
+                        for ((buffer, read) in filledChunks) {
+                            writeChunk(buffer, read)
+                            transfer.transferredBytes += read
+                            reportProgress(transfer)
+                            freeBuffers.trySend(buffer)
+                        }
+                    } finally {
+                        // 不管上面的迴圈是正常結束還是中途丟例外,都要先讓背景讀取工作停下來,
+                        // 才能安全關閉 input——否則讀取工作可能還卡在等 channel 有空位。
+                        readJob.cancelAndJoin()
+                    }
+                    readFailure?.let { throw it }
                 }
                 onStatusChanged?.invoke("「${transfer.fileName}」已送出,等待對方確認接收完成...")
             } catch (e: CancellationException) {
