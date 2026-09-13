@@ -103,6 +103,31 @@ class ConnectItService : LifecycleService() {
     private val _events = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val events: SharedFlow<String> = _events.asSharedFlow()
 
+    /** 使用者從通知按下「關閉」時觸發一次,見 [MainActivity] 對這個流的收集:負責把畫面也收掉。 */
+    private val _exitRequested = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val exitRequested: SharedFlow<Unit> = _exitRequested.asSharedFlow()
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
+        if (intent?.action == ACTION_STOP) {
+            // 使用者從通知直接按下「關閉」:除了把服務從前景/通知移除掉並結束它之外,還要通知
+            // MainActivity(如果當下開著)把畫面也收掉——否則 Service 只要還被 Activity 綁定著
+            // 就不會真的被系統回收(見下面 stopSelf() 的說明),使用者會覺得「按了關閉但 App 還開著」。
+            _exitRequested.tryEmit(Unit)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        } else {
+            // MainViewModel.bind() 每次 App 被開啟(或從背景回到前景)都會呼叫 startForegroundService(),
+            // 讓這裡重新收到一次 onStartCommand——不管 Service 本來是不是已經在跑。藉這個時機重貼一次
+            // 常駐通知:如果使用者之前手動把通知清掉(部分廠牌系統允許清除 ongoing 通知),重新開啟 App
+            // 時就能讓通知補回來,而不是要等 Service 被整個重建(onCreate 只會在真正重建時執行一次)。
+            ServiceCompat.startForeground(
+                this, NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+        }
+        return START_NOT_STICKY
+    }
+
     override fun onCreate() {
         super.onCreate()
         ServiceCompat.startForeground(
@@ -377,11 +402,17 @@ class ConnectItService : LifecycleService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
+        val stopIntent = PendingIntent.getService(
+            this, 0, Intent(this, ConnectItService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(getString(R.string.notification_running))
             .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(contentIntent)
+            .addAction(R.drawable.ic_notification, getString(R.string.notification_action_stop), stopIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
@@ -467,6 +498,9 @@ class ConnectItService : LifecycleService() {
     }
 
     companion object {
+        /** 通知上「關閉」按鈕送出的 Intent action,見 [onStartCommand]。 */
+        const val ACTION_STOP = "com.connectit.android.service.ACTION_STOP"
+
         private const val CHANNEL_ID = "connectit_service"
         private const val NOTIFICATION_ID = 1
         // v2:原本只用來發傳輸提議通知、用 IMPORTANCE_DEFAULT 建立過,現在改成 IMPORTANCE_HIGH

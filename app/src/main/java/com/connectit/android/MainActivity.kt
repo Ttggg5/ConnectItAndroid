@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -66,6 +67,11 @@ class MainActivity : ComponentActivity() {
                             CircularProgressIndicator()
                         }
                     } else {
+                        // 使用者從通知按下「關閉」:服務會自己停止,這裡另外把畫面也收掉並從
+                        // 最近使用的 App 清單移除,讓「關閉」的效果跟使用者預期的「整個 App 關掉」一致。
+                        LaunchedEffect(current) {
+                            current.exitRequested.collect { finishAndRemoveTask() }
+                        }
                         ConnectItApp(service = current)
                     }
                 }

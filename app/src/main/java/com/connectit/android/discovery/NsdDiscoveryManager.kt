@@ -5,7 +5,9 @@ import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.util.Log
 import com.connectit.android.model.DiscoveredDevice
+import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.NetworkInterface
 import java.util.ArrayDeque
 import java.util.UUID
 
@@ -180,6 +182,13 @@ class NsdDiscoveryManager(
 
     private fun emit(info: NsdServiceInfo) {
         val address: InetAddress = info.host ?: return
+
+        // 保險判斷:不只靠服務名稱字串比對是不是自己(見 isSelf 的說明——如果上一次 App 是被
+        // 強制關閉而不是正常結束,舊的服務名稱/連接埠可能還殘留在網路上沒過期,新的隨機短碼
+        // 對不上就會誤判成「找到一台新裝置」)。只要解析到的位址就是本機自己的網卡位址,
+        // 不管名稱或連接埠是不是對得上,一定是自己,直接過濾掉。
+        if (isLocalAddress(address)) return
+
         val friendlyName = readFriendlyNameAttribute(info)
 
         onDeviceDiscovered?.invoke(
@@ -195,6 +204,15 @@ class NsdDiscoveryManager(
     private fun readFriendlyNameAttribute(info: NsdServiceInfo): String? = runCatching {
         info.attributes["name"]?.let { String(it, Charsets.UTF_8) }
     }.getOrNull()
+
+    /** 每次都重新列舉,避免快取到 Wi-Fi 重新連線、切換網路後已經失效的舊位址。 */
+    private fun isLocalAddress(address: InetAddress): Boolean = runCatching {
+        NetworkInterface.getNetworkInterfaces().asSequence()
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { it.inetAddresses.asSequence() }
+            .filterIsInstance<Inet4Address>()
+            .any { it == address }
+    }.getOrDefault(false)
 
     companion object {
         const val DEVICE_SERVICE_TYPE = "_connectit._tcp."

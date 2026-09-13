@@ -2,6 +2,7 @@
     <string name="app_name">ConnectIt</string>
     <string name="notification_channel_name">ConnectIt 背景服務</string>
     <string name="notification_running">ConnectIt 正在背景執行,持續搜尋與監聽連線</string>
+    <string name="notification_action_stop">關閉</string>
     <string name="notification_alert_channel_name">ConnectIt 連線與傳輸提醒</string>
     <string name="notification_incoming_transfer_title">%1$s 正在傳送檔案給你</string>
     <string name="notification_incoming_transfer_unknown_peer">對方</string>
