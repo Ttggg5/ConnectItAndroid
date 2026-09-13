@@ -72,4 +72,9 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    testImplementation("junit:junit:4.13.2")
+    // Android 的 org.json 在本機單元測試(JVM,非模擬器)裡預設是空殼實作(呼叫會直接丟例外),
+    // 得額外加這個真正的實作才能測到 JsonMessages.kt 裡實際的 JSONObject 編解碼邏輯。
+    testImplementation("org.json:json:20240303")
 }
