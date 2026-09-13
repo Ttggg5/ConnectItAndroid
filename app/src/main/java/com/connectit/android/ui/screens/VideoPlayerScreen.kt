@@ -10,15 +10,20 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
@@ -53,6 +58,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -64,11 +71,14 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import coil.compose.AsyncImage
 import com.connectit.android.R
 import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.net.videoMediaUrl
+import com.connectit.android.net.videoThumbnailUrl
 import com.connectit.android.repo.PlaybackPreferences
+import com.connectit.android.ui.components.AdaptiveNavigationBreakpoint
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -295,147 +305,282 @@ fun VideoPlayerScreen(
             }
         },
     ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(if (isFullscreen) androidx.compose.foundation.layout.PaddingValues(0.dp) else padding)) {
-            Box(
-                modifier = if (isFullscreen) {
-                    Modifier.fillMaxSize()
-                } else {
-                    Modifier.fillMaxWidth().aspectRatio(16f / 9f)
-                },
-            ) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize().clickable { togglePlayPause() },
-                    factory = { ctx ->
-                        (LayoutInflater.from(ctx).inflate(R.layout.view_video_player, null) as PlayerView).apply {
-                            player = exoPlayer
-                        }
-                    },
-                )
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize().padding(if (isFullscreen) PaddingValues(0.dp) else padding),
+        ) {
+            // 折疊機攤開、平板橫向這種寬螢幕才顯示側邊清單(對應 Windows 觀看頁
+            // `main.watch{grid-template-columns:minmax(0,1fr) 360px}` 的側邊清單),
+            // 手機直向寬度不夠、或全螢幕播放時都只顯示播放器本身。
+            val showSidebar = !isFullscreen && maxWidth >= AdaptiveNavigationBreakpoint && entries.size > 1
 
-                countdownSeconds?.let { seconds ->
-                    Card(
-                        modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            val playerContent: @Composable () -> Unit = {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Box(
+                        modifier = if (isFullscreen) {
+                            Modifier.fillMaxSize()
+                        } else {
+                            Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                        },
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            Text("即將播放下一部…($seconds)")
-                            TextButton(onClick = { cancelCountdown() }) { Text("取消") }
-                        }
-                    }
-                }
-            }
-
-            if (!isFullscreen) {
-                currentEntry?.let {
-                    Text(
-                        it.name,
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    )
-                }
-            }
-
-            Column(modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(8.dp)) {
-                Slider(
-                    value = if (isSeeking) seekPreviewFraction else fractionOf(positionMs, durationMs),
-                    onValueChange = {
-                        isSeeking = true
-                        seekPreviewFraction = it
-                    },
-                    onValueChangeFinished = {
-                        val target = (seekPreviewFraction * durationMs).toLong()
-                        exoPlayer.seekTo(target)
-                        isSeeking = false
-                    },
-                )
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { playIndex(currentIndex - 1) }, enabled = currentIndex > 0) {
-                        Icon(Icons.Filled.SkipPrevious, contentDescription = "上一部")
-                    }
-                    IconButton(onClick = { exoPlayer.seekTo((exoPlayer.currentPosition - SkipDurationMs).coerceAtLeast(0L)) }) {
-                        Icon(Icons.Filled.FastRewind, contentDescription = "倒退 10 秒")
-                    }
-                    IconButton(onClick = { togglePlayPause() }) {
-                        Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = "播放/暫停")
-                    }
-                    IconButton(onClick = {
-                        val max = durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE
-                        exoPlayer.seekTo((exoPlayer.currentPosition + SkipDurationMs).coerceAtMost(max))
-                    }) {
-                        Icon(Icons.Filled.FastForward, contentDescription = "快轉 10 秒")
-                    }
-                    IconButton(onClick = { playIndex(currentIndex + 1) }, enabled = currentIndex < entries.size - 1) {
-                        Icon(Icons.Filled.SkipNext, contentDescription = "下一部")
-                    }
-                    Text(
-                        "${formatDuration(positionMs)} / ${formatDuration(durationMs)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(horizontal = 4.dp),
-                    )
-                }
-
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(
-                            checked = autoplayNext,
-                            onCheckedChange = { checked ->
-                                autoplayNext = checked
-                                scope.launch { prefs.setAutoplayNext(checked) }
-                                if (!checked) cancelCountdown()
+                        AndroidView(
+                            modifier = Modifier.fillMaxSize().clickable { togglePlayPause() },
+                            factory = { ctx ->
+                                (LayoutInflater.from(ctx).inflate(R.layout.view_video_player, null) as PlayerView).apply {
+                                    player = exoPlayer
+                                }
                             },
                         )
-                        Text("自動播放下一部", style = MaterialTheme.typography.bodySmall)
-                    }
 
-                    Box {
-                        TextButton(onClick = { speedMenuExpanded = true }) { Text("${speed}x") }
-                        DropdownMenu(expanded = speedMenuExpanded, onDismissRequest = { speedMenuExpanded = false }) {
-                            SpeedOptions.forEach { option ->
-                                DropdownMenuItem(
-                                    text = { Text("${option}x") },
-                                    onClick = {
-                                        speed = option
-                                        exoPlayer.setPlaybackSpeed(option)
-                                        scope.launch { prefs.setSpeed(option) }
-                                        speedMenuExpanded = false
-                                    },
-                                )
+                        countdownSeconds?.let { seconds ->
+                            Card(
+                                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                ) {
+                                    Text("即將播放下一部…($seconds)")
+                                    TextButton(onClick = { cancelCountdown() }) { Text("取消") }
+                                }
                             }
                         }
                     }
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { toggleMute() }) {
-                            Icon(
-                                if (volume <= 0f) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
-                                contentDescription = "靜音",
+                    if (!isFullscreen) {
+                        currentEntry?.let {
+                            Text(
+                                it.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                             )
                         }
-                        Slider(
-                            value = volume,
-                            onValueChange = { setVolumeAndPersist(it) },
-                            modifier = Modifier.width(100.dp),
-                        )
                     }
 
-                    IconButton(onClick = { applyFullscreen(!isFullscreen) }) {
-                        Icon(
-                            if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                            contentDescription = "全螢幕",
+                    VideoControls(
+                        isPlaying = isPlaying,
+                        positionMs = positionMs,
+                        durationMs = durationMs,
+                        isSeeking = isSeeking,
+                        seekPreviewFraction = seekPreviewFraction,
+                        onSeekChange = { isSeeking = true; seekPreviewFraction = it },
+                        onSeekFinished = {
+                            exoPlayer.seekTo((seekPreviewFraction * durationMs).toLong())
+                            isSeeking = false
+                        },
+                        hasPrevious = currentIndex > 0,
+                        hasNext = currentIndex < entries.size - 1,
+                        onPrevious = { playIndex(currentIndex - 1) },
+                        onNext = { playIndex(currentIndex + 1) },
+                        onRewind = { exoPlayer.seekTo((exoPlayer.currentPosition - SkipDurationMs).coerceAtLeast(0L)) },
+                        onForward = {
+                            val max = durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE
+                            exoPlayer.seekTo((exoPlayer.currentPosition + SkipDurationMs).coerceAtMost(max))
+                        },
+                        onPlayPause = { togglePlayPause() },
+                        autoplayNext = autoplayNext,
+                        onAutoplayNextChange = { checked ->
+                            autoplayNext = checked
+                            scope.launch { prefs.setAutoplayNext(checked) }
+                            if (!checked) cancelCountdown()
+                        },
+                        speed = speed,
+                        onSpeedChange = { option ->
+                            speed = option
+                            exoPlayer.setPlaybackSpeed(option)
+                            scope.launch { prefs.setSpeed(option) }
+                        },
+                        volume = volume,
+                        onVolumeChange = { setVolumeAndPersist(it) },
+                        onToggleMute = { toggleMute() },
+                        isFullscreen = isFullscreen,
+                        onToggleFullscreen = { applyFullscreen(!isFullscreen) },
+                    )
+                }
+            }
+
+            if (showSidebar) {
+                Row(Modifier.fillMaxSize()) {
+                    Box(Modifier.weight(1f).fillMaxHeight()) { playerContent() }
+                    VideoSidebar(
+                        entries = entries,
+                        currentIndex = currentIndex,
+                        server = server,
+                        onSelect = { index -> playIndex(index) },
+                        modifier = Modifier.width(320.dp).fillMaxHeight(),
+                    )
+                }
+            } else {
+                playerContent()
+            }
+        }
+    }
+}
+
+@Composable
+private fun VideoControls(
+    isPlaying: Boolean,
+    positionMs: Long,
+    durationMs: Long,
+    isSeeking: Boolean,
+    seekPreviewFraction: Float,
+    onSeekChange: (Float) -> Unit,
+    onSeekFinished: () -> Unit,
+    hasPrevious: Boolean,
+    hasNext: Boolean,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onRewind: () -> Unit,
+    onForward: () -> Unit,
+    onPlayPause: () -> Unit,
+    autoplayNext: Boolean,
+    onAutoplayNextChange: (Boolean) -> Unit,
+    speed: Float,
+    onSpeedChange: (Float) -> Unit,
+    volume: Float,
+    onVolumeChange: (Float) -> Unit,
+    onToggleMute: () -> Unit,
+    isFullscreen: Boolean,
+    onToggleFullscreen: () -> Unit,
+) {
+    var speedMenuExpanded by remember { mutableStateOf(false) }
+
+    Column(modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(8.dp)) {
+        Slider(
+            value = if (isSeeking) seekPreviewFraction else fractionOf(positionMs, durationMs),
+            onValueChange = onSeekChange,
+            onValueChangeFinished = onSeekFinished,
+        )
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onPrevious, enabled = hasPrevious) {
+                Icon(Icons.Filled.SkipPrevious, contentDescription = "上一部")
+            }
+            IconButton(onClick = onRewind) {
+                Icon(Icons.Filled.FastRewind, contentDescription = "倒退 10 秒")
+            }
+            IconButton(onClick = onPlayPause) {
+                Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = "播放/暫停")
+            }
+            IconButton(onClick = onForward) {
+                Icon(Icons.Filled.FastForward, contentDescription = "快轉 10 秒")
+            }
+            IconButton(onClick = onNext, enabled = hasNext) {
+                Icon(Icons.Filled.SkipNext, contentDescription = "下一部")
+            }
+            Text(
+                "${formatDuration(positionMs)} / ${formatDuration(durationMs)}",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
+        }
+
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = autoplayNext, onCheckedChange = onAutoplayNextChange)
+                Text("自動播放下一部", style = MaterialTheme.typography.bodySmall)
+            }
+
+            Box {
+                TextButton(onClick = { speedMenuExpanded = true }) { Text("${speed}x") }
+                DropdownMenu(expanded = speedMenuExpanded, onDismissRequest = { speedMenuExpanded = false }) {
+                    SpeedOptions.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text("${option}x") },
+                            onClick = {
+                                onSpeedChange(option)
+                                speedMenuExpanded = false
+                            },
+                        )
+                    }
+                }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onToggleMute) {
+                    Icon(
+                        if (volume <= 0f) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                        contentDescription = "靜音",
+                    )
+                }
+                Slider(
+                    value = volume,
+                    onValueChange = onVolumeChange,
+                    modifier = Modifier.width(100.dp),
+                )
+            }
+
+            IconButton(onClick = onToggleFullscreen) {
+                Icon(
+                    if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                    contentDescription = "全螢幕",
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun VideoSidebar(
+    entries: List<VideoManifestEntry>,
+    currentIndex: Int,
+    server: DiscoveredDevice,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyColumn(
+        modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+        contentPadding = PaddingValues(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        itemsIndexed(entries, key = { _, entry -> entry.relativePath }) { index, entry ->
+            val isCurrent = index == currentIndex
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (isCurrent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)
+                    .clickable(enabled = !isCurrent) { onSelect(index) }
+                    .padding(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(modifier = Modifier.width(110.dp).aspectRatio(16f / 9f)) {
+                    AsyncImage(
+                        model = videoThumbnailUrl(server.host, server.port, entry.relativePath),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(6.dp)),
+                        contentScale = ContentScale.Crop,
+                    )
+                }
+                Column {
+                    Text(entry.name, style = MaterialTheme.typography.bodyMedium, maxLines = 2)
+                    Text(formatBytes(entry.size), style = MaterialTheme.typography.bodySmall)
+                    if (isCurrent) {
+                        Text(
+                            "正在播放",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
                         )
                     }
                 }
             }
         }
     }
+}
+
+private fun formatBytes(bytes: Long): String {
+    val units = arrayOf("B", "KB", "MB", "GB")
+    var value = bytes.toDouble()
+    var unitIndex = 0
+    while (value >= 1024 && unitIndex < units.size - 1) {
+        value /= 1024
+        unitIndex++
+    }
+    return if (unitIndex == 0) "${value.toInt()} ${units[unitIndex]}" else String.format("%.1f %s", value, units[unitIndex])
 }
 
 private fun fractionOf(position: Long, duration: Long): Float =

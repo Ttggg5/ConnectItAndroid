@@ -9,8 +9,9 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Sort
@@ -123,9 +124,14 @@ fun VideoServerScreen(
             }
             is ManifestState.Loaded -> {
                 val entries = current.response.entries.sortedByOption(sort)
-                LazyColumn(
+                // 用自動排列的格線,而不是固定單欄清單:折疊機攤開、平板橫向這種寬螢幕下會自動
+                // 排成兩欄以上,對應 Windows 首頁 `repeat(auto-fill, minmax(220px,1fr))` 的效果,
+                // 手機直向寬度不夠時自然退回單欄,行為不變。
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 200.dp),
                     modifier = Modifier.fillMaxSize().padding(padding),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                     contentPadding = PaddingValues(16.dp),
                 ) {
                     items(entries, key = { it.relativePath }) { entry ->
