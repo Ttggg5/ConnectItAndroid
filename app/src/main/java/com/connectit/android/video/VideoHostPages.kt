@@ -1,0 +1,504 @@
+package com.connectit.android.video
+
+import android.net.Uri
+
+/** 影片伺服器 manifest 裡的一筆項目,對應 Windows 端的 VideoManifestEntry.cs。 */
+data class HostManifestEntry(
+    val name: String,
+    val relativePath: String,
+    val size: Long,
+    val modifiedEpochMillis: Long,
+)
+
+/** 排序方式:(query string 用的值, 下拉選單顯示的文字)。跟 Windows 端 VideoStreamingService.cs
+ * 的 SortOptions 一一對應,兩邊算出來的排序結果才會一致。 */
+enum class VideoSort(val value: String, val label: String) {
+    NAME_ASC("name_asc", "檔名(A→Z)"),
+    NAME_DESC("name_desc", "檔名(Z→A)"),
+    SIZE_ASC("size_asc", "檔案大小(小→大)"),
+    SIZE_DESC("size_desc", "檔案大小(大→小)"),
+    DATE_DESC("date_desc", "修改時間(新→舊)"),
+    DATE_ASC("date_asc", "修改時間(舊→新)");
+
+    companion object {
+        const val DEFAULT_VALUE = "name_asc"
+
+        fun fromValue(value: String?): VideoSort = entries.firstOrNull { it.value == value } ?: NAME_ASC
+    }
+}
+
+/**
+ * 產生影片伺服器的網頁(像 YouTube 一樣的首頁清單 + 觀看頁),對應 Windows 端
+ * VideoStreamingService.cs 裡同名的私有方法群——刻意讓 HTML/CSS/JS 幾乎逐字一致,這樣不管
+ * 觀看端連到的是 Windows 主機還是 Android 主機分享出來的影片庫,體驗都完全一樣。
+ *
+ * 只依賴內嵌的 SVG 圖示/CSS/JS,不連外部 CDN——伺服器只在區網內服務,不能假設觀看端連得到網際網路。
+ */
+object VideoHostPages {
+
+    private object Icons {
+        const val PLAY_ARROW = "M8 5v14l11-7z"
+        const val PAUSE = "M6 19h4V5H6v14zm8-14v14h4V5h-4z"
+        const val SKIP_PREVIOUS = "M6 6h2v12H6zm3.5 6l8.5 6V6z"
+        const val SKIP_NEXT = "M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"
+        const val FAST_REWIND = "M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z"
+        const val FAST_FORWARD = "M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"
+        const val VOLUME_UP = "M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"
+        const val VOLUME_OFF = "M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"
+        const val FULLSCREEN = "M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"
+        const val FULLSCREEN_EXIT = "M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"
+        const val ARROW_BACK = "M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"
+        const val PLAY_CIRCLE = "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"
+    }
+
+    private fun svg(path: String, size: Int = 20): String =
+        """<svg viewBox="0 0 24 24" width="$size" height="$size" fill="currentColor" aria-hidden="true"><path d="$path"/></svg>"""
+
+    // 讓瀏覽器的「上一頁」永遠回到首頁,而不是照瀏覽紀錄一頁一頁往回跳到上一支影片。
+    private const val BACK_TO_HOME_TRAP_SCRIPT = """
+        (function () {
+          if (!window.history || !window.history.pushState) { return; }
+          history.pushState(null, '', location.href);
+          window.addEventListener('popstate', function () {
+            location.href = '/';
+          });
+        })();
+        """
+
+    private val SHARED_CSS = """
+        :root{color-scheme:dark;--accent:#8b5cf6;}
+        *{box-sizing:border-box;}
+        body{margin:0;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;background:#0f0f0f;color:#f1f1f1;}
+        header{padding:16px 20px;border-bottom:1px solid #272727;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+        header h1{margin:0;font-size:18px;}
+        a.back{color:#f1f1f1;text-decoration:none;font-size:16px;font-weight:600;display:inline-flex;align-items:center;gap:6px;}
+        .sort-label{font-size:12px;color:#aaa;display:flex;align-items:center;gap:8px;white-space:nowrap;}
+        .sort-label select{background:#2a2a2a;color:#f1f1f1;border:1px solid #3a3a3a;border-radius:6px;font-size:12px;padding:6px 8px;}
+        .sidebar .sort-label{padding:0 2px 8px;}
+        main.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;padding:20px;}
+        .card{color:inherit;text-decoration:none;background:#181818;border-radius:12px;overflow:hidden;display:block;}
+        .card:hover{background:#222;}
+        .thumb{aspect-ratio:16/9;position:relative;overflow:hidden;color:#555;background:#272727;}
+        .thumb-fallback{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;}
+        .thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#272727;}
+        .card .title{padding:10px 12px 2px;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+        .card .meta{padding:0 12px 12px;font-size:12px;color:#aaa;}
+        main.watch{max-width:1400px;margin:0 auto;padding:20px;display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:24px;align-items:start;}
+        main.watch .primary{min-width:0;}
+        main.watch h1{font-size:18px;margin:16px 0 4px;}
+        main.watch .meta{color:#aaa;font-size:13px;margin:0 0 16px;}
+        @media (max-width:860px){main.watch{grid-template-columns:minmax(0,1fr);}}
+
+        .sidebar{display:flex;flex-direction:column;gap:4px;}
+        .side-item{color:#f1f1f1;text-decoration:none;padding:6px;border-radius:8px;display:flex;gap:10px;align-items:flex-start;cursor:pointer;}
+        a.side-item:hover{background:#272727;}
+        .side-item.current{background:#211a2e;}
+        .side-thumb{position:relative;flex:0 0 130px;width:130px;aspect-ratio:16/9;border-radius:8px;overflow:hidden;background:#272727;color:#555;}
+        .side-thumb-fallback{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;}
+        .side-thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;}
+        .side-info{min-width:0;flex:1;padding-top:1px;}
+        .side-title{font-size:13px;font-weight:600;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+        .side-item.current .side-title{color:var(--accent);}
+        .side-meta{font-size:11px;color:#aaa;margin-top:4px;}
+        .now-playing{font-size:11px;color:var(--accent);font-weight:600;margin-top:4px;display:flex;align-items:center;gap:4px;}
+        .now-playing svg{width:12px;height:12px;}
+
+        .player-wrap{position:relative;background:#000;border-radius:12px;overflow:hidden;}
+        .player-wrap video{width:100%;max-height:70vh;display:block;background:#000;}
+        .controls{background:#181818;padding:6px 12px 10px;}
+        .controls input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:5px;border-radius:3px;background:#3a3a3a;outline:none;cursor:pointer;}
+        .controls input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:13px;height:13px;border-radius:50%;background:var(--accent);cursor:pointer;}
+        .controls input[type=range]::-moz-range-thumb{width:13px;height:13px;border:none;border-radius:50%;background:var(--accent);cursor:pointer;}
+        .progress-row{padding:6px 0 4px;}
+        .controls-row{display:flex;align-items:center;gap:2px;flex-wrap:wrap;}
+        .controls-row button{background:none;border:none;color:#f1f1f1;cursor:pointer;padding:6px 8px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;}
+        .controls-row button svg{display:block;}
+        .controls-row button:hover{background:#2a2a2a;}
+        .controls-row button:disabled{opacity:.3;cursor:default;}
+        .controls-row button:disabled:hover{background:none;}
+        .time{font-size:12px;color:#ccc;white-space:nowrap;padding:0 6px;}
+        .spacer{flex:1;}
+        .autoplay-toggle{display:flex;align-items:center;gap:4px;font-size:12px;color:#ccc;white-space:nowrap;cursor:pointer;padding:0 6px;}
+        #volume{width:70px;}
+        #speed{background:#2a2a2a;color:#f1f1f1;border:1px solid #3a3a3a;border-radius:6px;font-size:12px;padding:4px 2px;margin:0 4px;}
+        .next-overlay{position:absolute;right:16px;bottom:16px;background:rgba(24,24,24,.95);border-radius:10px;padding:12px 14px;display:flex;align-items:center;gap:12px;box-shadow:0 4px 16px rgba(0,0,0,.5);}
+        .next-overlay[hidden]{display:none;}
+        .next-overlay span{font-size:13px;}
+        .next-overlay button{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;}
+        """.trimIndent()
+
+    private fun buildSortSelectHtml(selected: String, onChangeUrlPrefix: String): String {
+        val options = VideoSort.entries.joinToString("\n") { option ->
+            val selectedAttr = if (option.value == selected) " selected" else ""
+            """<option value="${option.value}"$selectedAttr>${option.label}</option>"""
+        }
+        return """
+            <label class="sort-label">排序方式
+              <select onchange="location.href='$onChangeUrlPrefix'+this.value">
+                $options
+              </select>
+            </label>
+            """.trimIndent()
+    }
+
+    /** 依排序方式,回傳 manifest 項目「顯示順序」的索引清單(內容還是指向原始索引,只是走訪順序不同)。
+     * 首頁清單、觀看頁側邊清單、上一部/下一部都共用同一份排序邏輯。 */
+    fun displayOrder(manifest: List<HostManifestEntry>, sort: VideoSort): List<Int> {
+        val indices = manifest.indices.toList()
+        return when (sort) {
+            VideoSort.NAME_ASC -> indices.sortedBy { manifest[it].name.lowercase() }
+            VideoSort.NAME_DESC -> indices.sortedByDescending { manifest[it].name.lowercase() }
+            VideoSort.SIZE_ASC -> indices.sortedBy { manifest[it].size }
+            VideoSort.SIZE_DESC -> indices.sortedByDescending { manifest[it].size }
+            VideoSort.DATE_ASC -> indices.sortedBy { manifest[it].modifiedEpochMillis }
+            VideoSort.DATE_DESC -> indices.sortedByDescending { manifest[it].modifiedEpochMillis }
+        }
+    }
+
+    fun htmlEncode(value: String): String = buildString(value.length) {
+        for (c in value) {
+            when (c) {
+                '&' -> append("&amp;")
+                '<' -> append("&lt;")
+                '>' -> append("&gt;")
+                '"' -> append("&quot;")
+                '\'' -> append("&#39;")
+                else -> append(c)
+            }
+        }
+    }
+
+    /** 影片伺服器的相對路徑可能包含子目錄,逐段編碼避免 '/' 被誤當成路徑分隔符以外的用途跳脫掉。 */
+    fun escapeRelativePathForUrl(relativePath: String): String =
+        relativePath.split("/").joinToString("/") { Uri.encode(it) }
+
+    fun formatFileSize(bytes: Long): String {
+        val units = arrayOf("B", "KB", "MB", "GB")
+        var value = bytes.toDouble()
+        var unitIndex = 0
+        while (value >= 1024 && unitIndex < units.size - 1) {
+            value /= 1024
+            unitIndex++
+        }
+        return if (unitIndex == 0) "${value.toInt()} ${units[unitIndex]}" else "%.1f %s".format(value, units[unitIndex])
+    }
+
+    fun buildHomePageHtml(manifest: List<HostManifestEntry>, serverName: String, sort: VideoSort): String {
+        val cards = displayOrder(manifest, sort).joinToString("\n") { index ->
+            val entry = manifest[index]
+            """
+            <a class="card" href="/watch?v=$index&sort=${sort.value}">
+              <div class="thumb">
+                <div class="thumb-fallback">${svg(Icons.PLAY_CIRCLE, 40)}</div>
+                <img src="/thumbnail/${escapeRelativePathForUrl(entry.relativePath)}" alt="" loading="lazy" onerror="this.style.display='none'">
+              </div>
+              <div class="title">${htmlEncode(entry.name)}</div>
+              <div class="meta">${formatFileSize(entry.size)}</div>
+            </a>
+            """.trimIndent()
+        }
+
+        val title = htmlEncode(serverName)
+        return """
+            <!doctype html>
+            <html lang="zh-Hant">
+            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>$title</title>
+            <style>$SHARED_CSS</style></head>
+            <body>
+              <header>
+                <h1>$title</h1>
+                ${buildSortSelectHtml(sort.value, "/?sort=")}
+              </header>
+              <main class="grid">
+                $cards
+              </main>
+              <script>$BACK_TO_HOME_TRAP_SCRIPT</script>
+            </body>
+            </html>
+            """.trimIndent()
+    }
+
+    fun buildWatchPageHtml(manifest: List<HostManifestEntry>, serverName: String, index: Int, sort: VideoSort): String {
+        val entry = manifest[index]
+        val order = displayOrder(manifest, sort)
+        val position = order.indexOf(index)
+        val hasPrev = position > 0
+        val hasNext = position in 0 until order.size - 1
+        val prevIndex = if (hasPrev) order[position - 1] else null
+        val nextIndex = if (hasNext) order[position + 1] else null
+
+        val sidebar = if (manifest.size > 1) {
+            """
+            <aside class="sidebar">
+              ${buildSortSelectHtml(sort.value, "/watch?v=$index&sort=")}
+              ${buildSidebarItems(manifest, order, index, sort)}
+            </aside>
+            """.trimIndent()
+        } else {
+            ""
+        }
+        val title = htmlEncode(entry.name)
+        val backLabel = htmlEncode(serverName)
+
+        // 傳給前端 JS 用的中繼資料,以 JSON 安全編碼字串內容,並把 "</" 斷開避免檔名剛好含有
+        // "</script>" 這種字串時提早把 <script> 區塊截斷。
+        val relativePathJson = org.json.JSONObject.quote(entry.relativePath).replace("</", "<\\/")
+        val sortJson = org.json.JSONObject.quote(sort.value).replace("</", "<\\/")
+        val prevIndexJson = prevIndex?.toString() ?: "null"
+        val nextIndexJson = nextIndex?.toString() ?: "null"
+
+        return """
+            <!doctype html>
+            <html lang="zh-Hant">
+            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>$title</title>
+            <style>$SHARED_CSS</style></head>
+            <body>
+              <header><a class="back" href="/?sort=${sort.value}">${svg(Icons.ARROW_BACK, 18)} $backLabel</a></header>
+              <main class="watch">
+                <div class="primary">
+                  <div class="player-wrap" id="playerWrap">
+                    <video id="player" src="/media/${escapeRelativePathForUrl(entry.relativePath)}" poster="/thumbnail/${escapeRelativePathForUrl(entry.relativePath)}"></video>
+                    <div class="next-overlay" id="nextOverlay" hidden>
+                      <span id="nextOverlayText"></span>
+                      <button id="cancelNextBtn" type="button">取消</button>
+                    </div>
+                  </div>
+                  <div class="controls">
+                    <div class="progress-row">
+                      <input type="range" id="seek" min="0" max="0" step="0.1" value="0">
+                    </div>
+                    <div class="controls-row">
+                      <button id="prevBtn" type="button" title="上一部"${if (hasPrev) "" else " disabled"}>${svg(Icons.SKIP_PREVIOUS)}</button>
+                      <button id="backBtn" type="button" title="倒退 10 秒">${svg(Icons.FAST_REWIND)}</button>
+                      <button id="playBtn" type="button" title="播放/暫停">${svg(Icons.PLAY_ARROW)}</button>
+                      <button id="fwdBtn" type="button" title="快轉 10 秒">${svg(Icons.FAST_FORWARD)}</button>
+                      <button id="nextBtn" type="button" title="下一部"${if (hasNext) "" else " disabled"}>${svg(Icons.SKIP_NEXT)}</button>
+                      <span class="time" id="time">0:00 / 0:00</span>
+                      <span class="spacer"></span>
+                      <label class="autoplay-toggle"><input type="checkbox" id="autoplayNext" checked> 自動播放下一部</label>
+                      <select id="speed" title="播放速度">
+                        <option value="0.5">0.5x</option>
+                        <option value="1" selected>1x</option>
+                        <option value="1.25">1.25x</option>
+                        <option value="1.5">1.5x</option>
+                        <option value="2">2x</option>
+                      </select>
+                      <button id="muteBtn" type="button" title="靜音">${svg(Icons.VOLUME_UP)}</button>
+                      <input type="range" id="volume" min="0" max="100" value="100">
+                      <button id="fsBtn" type="button" title="全螢幕">${svg(Icons.FULLSCREEN)}</button>
+                    </div>
+                  </div>
+                  <h1>$title</h1>
+                  <p class="meta">${formatFileSize(entry.size)}</p>
+                </div>
+                $sidebar
+              </main>
+              <script>$BACK_TO_HOME_TRAP_SCRIPT</script>
+              <script>${buildWatchPageScript(relativePathJson, prevIndexJson, nextIndexJson, sortJson)}</script>
+            </body>
+            </html>
+            """.trimIndent()
+    }
+
+    /** 右側影片清單:依目前選的排序方式列出全部影片(含目前播放中的那一部),每筆都附縮圖,
+     * 目前播放中的那筆用樣式標示、不能再點。 */
+    private fun buildSidebarItems(manifest: List<HostManifestEntry>, order: List<Int>, currentIndex: Int, sort: VideoSort): String =
+        order.joinToString("\n") { i ->
+            val entry = manifest[i]
+            val isCurrent = i == currentIndex
+            val thumb = """
+                <div class="side-thumb">
+                  <div class="side-thumb-fallback">${svg(Icons.PLAY_CIRCLE, 24)}</div>
+                  <img src="/thumbnail/${escapeRelativePathForUrl(entry.relativePath)}" alt="" loading="lazy" onerror="this.style.display='none'">
+                </div>
+                """.trimIndent()
+            val info = """
+                <div class="side-info">
+                  <div class="side-title">${htmlEncode(entry.name)}</div>
+                  <div class="side-meta">${formatFileSize(entry.size)}</div>
+                  ${if (isCurrent) """<div class="now-playing">${svg(Icons.PLAY_ARROW)} 正在播放</div>""" else ""}
+                </div>
+                """.trimIndent()
+
+            if (isCurrent) {
+                """<div class="side-item current">$thumb$info</div>"""
+            } else {
+                """<a class="side-item" href="/watch?v=$i&sort=${sort.value}">$thumb$info</a>"""
+            }
+        }
+
+    private fun buildWatchPageScript(relativePathJson: String, prevIndexJson: String, nextIndexJson: String, sortJson: String): String = """
+        (function () {
+          var meta = { relativePath: $relativePathJson, prevIndex: $prevIndexJson, nextIndex: $nextIndexJson, sort: $sortJson };
+          function watchUrl(index) { return '/watch?v=' + index + '&sort=' + meta.sort; }
+          var ICON_PLAY = '${svg(Icons.PLAY_ARROW)}';
+          var ICON_PAUSE = '${svg(Icons.PAUSE)}';
+          var ICON_VOLUME_UP = '${svg(Icons.VOLUME_UP)}';
+          var ICON_VOLUME_OFF = '${svg(Icons.VOLUME_OFF)}';
+          var ICON_FULLSCREEN = '${svg(Icons.FULLSCREEN)}';
+          var ICON_FULLSCREEN_EXIT = '${svg(Icons.FULLSCREEN_EXIT)}';
+          var video = document.getElementById('player');
+          var playBtn = document.getElementById('playBtn');
+          var seek = document.getElementById('seek');
+          var timeLabel = document.getElementById('time');
+          var backBtn = document.getElementById('backBtn');
+          var fwdBtn = document.getElementById('fwdBtn');
+          var prevBtn = document.getElementById('prevBtn');
+          var nextBtn = document.getElementById('nextBtn');
+          var muteBtn = document.getElementById('muteBtn');
+          var volume = document.getElementById('volume');
+          var speed = document.getElementById('speed');
+          var fsBtn = document.getElementById('fsBtn');
+          var autoplayNext = document.getElementById('autoplayNext');
+          var nextOverlay = document.getElementById('nextOverlay');
+          var nextOverlayText = document.getElementById('nextOverlayText');
+          var cancelNextBtn = document.getElementById('cancelNextBtn');
+          var playerWrap = document.getElementById('playerWrap');
+
+          var posKey = 'connectit-pos:' + meta.relativePath;
+          var volKey = 'connectit-volume';
+          var speedKey = 'connectit-speed';
+          var seeking = false;
+          var autoplayTimer = null;
+
+          function fmt(sec) {
+            if (!isFinite(sec) || sec < 0) sec = 0;
+            sec = Math.floor(sec);
+            var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+            var mm = (h > 0 && m < 10) ? ('0' + m) : String(m);
+            var ss = s < 10 ? ('0' + s) : String(s);
+            return h > 0 ? (h + ':' + mm + ':' + ss) : (mm + ':' + ss);
+          }
+
+          function updateSeekFill() {
+            var dur = video.duration || 0;
+            var playedPct = dur ? (video.currentTime / dur * 100) : 0;
+            var bufferedPct = 0;
+            if (video.buffered.length) {
+              bufferedPct = dur ? (video.buffered.end(video.buffered.length - 1) / dur * 100) : 0;
+            }
+            seek.style.background = 'linear-gradient(to right, var(--accent) ' + playedPct + '%, #666 ' + playedPct + '%, #666 ' + bufferedPct + '%, #3a3a3a ' + bufferedPct + '%)';
+          }
+
+          function updateMuteIcon() {
+            muteBtn.innerHTML = (video.muted || video.volume === 0) ? ICON_VOLUME_OFF : ICON_VOLUME_UP;
+          }
+
+          function togglePlay() {
+            if (video.paused) { video.play().catch(function () {}); } else { video.pause(); }
+          }
+
+          var savedVol = localStorage.getItem(volKey);
+          if (savedVol !== null) {
+            video.volume = Math.min(1, Math.max(0, parseFloat(savedVol)));
+            volume.value = String(Math.round(video.volume * 100));
+          }
+          var savedSpeed = localStorage.getItem(speedKey);
+          if (savedSpeed !== null) {
+            video.playbackRate = parseFloat(savedSpeed);
+            speed.value = savedSpeed;
+          }
+          updateMuteIcon();
+
+          video.addEventListener('loadedmetadata', function () {
+            seek.max = String(video.duration || 0);
+            var savedPos = parseFloat(localStorage.getItem(posKey) || '0');
+            if (savedPos > 5 && savedPos < video.duration - 5) {
+              video.currentTime = savedPos;
+            }
+            timeLabel.textContent = fmt(video.currentTime) + ' / ' + fmt(video.duration);
+            video.play().catch(function () {});
+          });
+
+          video.addEventListener('timeupdate', function () {
+            if (!seeking) { seek.value = String(video.currentTime); }
+            timeLabel.textContent = fmt(video.currentTime) + ' / ' + fmt(video.duration);
+            updateSeekFill();
+            if (video.currentTime > 2) {
+              localStorage.setItem(posKey, String(video.currentTime));
+            }
+          });
+          video.addEventListener('progress', updateSeekFill);
+          video.addEventListener('play', function () { playBtn.innerHTML = ICON_PAUSE; });
+          video.addEventListener('pause', function () { playBtn.innerHTML = ICON_PLAY; });
+          video.addEventListener('click', togglePlay);
+
+          video.addEventListener('ended', function () {
+            localStorage.removeItem(posKey);
+            if (meta.nextIndex === null || !autoplayNext.checked) { return; }
+
+            var secondsLeft = 5;
+            nextOverlay.hidden = false;
+            nextOverlayText.textContent = '即將播放下一部…(' + secondsLeft + ')';
+            autoplayTimer = setInterval(function () {
+              secondsLeft--;
+              if (secondsLeft <= 0) {
+                clearInterval(autoplayTimer);
+                location.href = watchUrl(meta.nextIndex);
+              } else {
+                nextOverlayText.textContent = '即將播放下一部…(' + secondsLeft + ')';
+              }
+            }, 1000);
+          });
+          cancelNextBtn.addEventListener('click', function () {
+            clearInterval(autoplayTimer);
+            nextOverlay.hidden = true;
+          });
+
+          playBtn.addEventListener('click', togglePlay);
+          backBtn.addEventListener('click', function () { video.currentTime = Math.max(0, video.currentTime - 10); });
+          fwdBtn.addEventListener('click', function () { video.currentTime = Math.min(video.duration || 1e9, video.currentTime + 10); });
+
+          seek.addEventListener('input', function () {
+            seeking = true;
+            timeLabel.textContent = fmt(parseFloat(seek.value)) + ' / ' + fmt(video.duration);
+          });
+          seek.addEventListener('change', function () {
+            video.currentTime = parseFloat(seek.value);
+            seeking = false;
+          });
+
+          volume.addEventListener('input', function () {
+            video.volume = Number(volume.value) / 100;
+            video.muted = false;
+            localStorage.setItem(volKey, String(video.volume));
+            updateMuteIcon();
+          });
+          muteBtn.addEventListener('click', function () { video.muted = !video.muted; updateMuteIcon(); });
+
+          speed.addEventListener('change', function () {
+            video.playbackRate = parseFloat(speed.value);
+            localStorage.setItem(speedKey, speed.value);
+          });
+
+          fsBtn.addEventListener('click', function () {
+            if (document.fullscreenElement) { document.exitFullscreen(); } else { playerWrap.requestFullscreen(); }
+          });
+          document.addEventListener('fullscreenchange', function () {
+            fsBtn.innerHTML = document.fullscreenElement ? ICON_FULLSCREEN_EXIT : ICON_FULLSCREEN;
+          });
+
+          if (meta.prevIndex !== null) {
+            prevBtn.addEventListener('click', function () { location.href = watchUrl(meta.prevIndex); });
+          }
+          if (meta.nextIndex !== null) {
+            nextBtn.addEventListener('click', function () { location.href = watchUrl(meta.nextIndex); });
+          }
+
+          document.addEventListener('keydown', function (e) {
+            var tag = (e.target && e.target.tagName) || '';
+            if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') { return; }
+
+            if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+            else if (e.key === 'ArrowLeft') { video.currentTime = Math.max(0, video.currentTime - 5); }
+            else if (e.key === 'ArrowRight') { video.currentTime = Math.min(video.duration || 1e9, video.currentTime + 5); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); volume.value = String(Math.min(100, Number(volume.value) + 5)); volume.dispatchEvent(new Event('input')); }
+            else if (e.key === 'ArrowDown') { e.preventDefault(); volume.value = String(Math.max(0, Number(volume.value) - 5)); volume.dispatchEvent(new Event('input')); }
+            else if (e.key === 'f' || e.key === 'F') { fsBtn.click(); }
+            else if (e.key === 'm' || e.key === 'M') { muteBtn.click(); }
+          });
+        })();
+        """.trimIndent()
+}

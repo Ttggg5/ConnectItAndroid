@@ -28,6 +28,9 @@ data class AppSettings(
     val connectTimeoutSeconds: Int = DEFAULT_CONNECT_TIMEOUT_SECONDS,
     /** 監聽用的 TCP 連接埠,0 代表由系統自動指派。 */
     val preferredPort: Int = 0,
+    /** 上一次選取用來分享影片的 SAF 資料夾(content:// tree Uri 字串),只是記住上次選擇方便
+     * 下次快速重新分享,不會在 App/服務啟動時自動開始分享。 */
+    val videoShareFolderUri: String? = null,
 ) {
     companion object {
         const val DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
@@ -54,6 +57,7 @@ class SettingsRepository(private val context: Context) {
         val CUSTOM_DOWNLOAD_FOLDER_URI = stringPreferencesKey("custom_download_folder_uri")
         val CONNECT_TIMEOUT_SECONDS = intPreferencesKey("connect_timeout_seconds")
         val PREFERRED_PORT = intPreferencesKey("preferred_port")
+        val VIDEO_SHARE_FOLDER_URI = stringPreferencesKey("video_share_folder_uri")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -66,6 +70,7 @@ class SettingsRepository(private val context: Context) {
             connectTimeoutSeconds = (prefs[Keys.CONNECT_TIMEOUT_SECONDS] ?: AppSettings.DEFAULT_CONNECT_TIMEOUT_SECONDS)
                 .coerceIn(AppSettings.MIN_CONNECT_TIMEOUT_SECONDS, AppSettings.MAX_CONNECT_TIMEOUT_SECONDS),
             preferredPort = prefs[Keys.PREFERRED_PORT] ?: 0,
+            videoShareFolderUri = prefs[Keys.VIDEO_SHARE_FOLDER_URI],
         )
     }
 
@@ -106,6 +111,12 @@ class SettingsRepository(private val context: Context) {
     suspend fun setPreferredPort(port: Int) {
         val normalized = if (port == 0) 0 else port.coerceIn(1024, 65535)
         context.dataStore.edit { it[Keys.PREFERRED_PORT] = normalized }
+    }
+
+    suspend fun setVideoShareFolderUri(uriString: String?) {
+        context.dataStore.edit {
+            if (uriString == null) it.remove(Keys.VIDEO_SHARE_FOLDER_URI) else it[Keys.VIDEO_SHARE_FOLDER_URI] = uriString
+        }
     }
 
     fun defaultDeviceName(): String = Build.MODEL ?: "Android"

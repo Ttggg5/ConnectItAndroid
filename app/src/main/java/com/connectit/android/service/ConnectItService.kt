@@ -37,6 +37,7 @@ import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.repo.SettingsRepository
 import com.connectit.android.util.DownloadStorage
 import com.connectit.android.util.SafUtils
+import com.connectit.android.video.VideoHostServer
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -54,6 +55,12 @@ sealed interface ConnectionUiState {
     data class Connected(val peer: ConnectedPeer) : ConnectionUiState
 }
 
+/** 這台裝置目前是否正把自己的影片庫分享出去(見 [VideoHostServer])。 */
+sealed interface VideoHostUiState {
+    data object Idle : VideoHostUiState
+    data class Running(val port: Int, val videoCount: Int, val folderName: String) : VideoHostUiState
+}
+
 data class TransferUiState(
     val title: String,
     val statusText: String,
@@ -63,7 +70,8 @@ data class TransferUiState(
 /**
  * 背景前景服務,對應 Windows 端「關閉視窗會隱藏到系統匣但持續在背景運作」的概念:
  * 持有裝置配對用的 mDNS 廣播/搜尋、TCP 監聽與連線交握/檔案傳輸(見 [ConnectionEngine]),
- * 以及影片伺服器的 mDNS 搜尋(Android 端目前只作為觀看端,不從手機分享影片)。
+ * 以及影片伺服器的 mDNS 廣播/搜尋——這台裝置既可以搜尋、觀看其他裝置分享的影片庫,
+ * 也可以把自己的影片庫分享出去給其他裝置觀看(見 [VideoHostServer])。
  *
  * UI(MainActivity/ViewModel)透過 [LocalBinder] 綁定,用這裡暴露的 StateFlow 觀察狀態、
  * 呼叫對應方法送出使用者的操作。
@@ -82,6 +90,7 @@ class ConnectItService : LifecycleService() {
     private lateinit var connectionEngine: ConnectionEngine
     private lateinit var deviceDiscovery: NsdDiscoveryManager
     private lateinit var videoDiscovery: NsdDiscoveryManager
+    private lateinit var videoHostServer: VideoHostServer
 
     /** 目前生效的設定快照,由 [onCreate] 裡的收集器持續更新,供不是 Compose 環境的內部邏輯
      * (通知開關、信任裝置比對、下載資料夾)同步讀取,不用每次都掛一個新的 Flow 收集器。 */
@@ -98,6 +107,9 @@ class ConnectItService : LifecycleService() {
 
     private val _videoServers = MutableStateFlow<List<DiscoveredDevice>>(emptyList())
     val videoServers: StateFlow<List<DiscoveredDevice>> = _videoServers.asStateFlow()
+
+    private val _videoHostState = MutableStateFlow<VideoHostUiState>(VideoHostUiState.Idle)
+    val videoHostState: StateFlow<VideoHostUiState> = _videoHostState.asStateFlow()
 
     private val _connectionState = MutableStateFlow<ConnectionUiState>(ConnectionUiState.Idle)
     val connectionState: StateFlow<ConnectionUiState> = _connectionState.asStateFlow()
@@ -150,6 +162,7 @@ class ConnectItService : LifecycleService() {
         val nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
         deviceDiscovery = NsdDiscoveryManager(nsdManager, NsdDiscoveryManager.DEVICE_SERVICE_TYPE)
         videoDiscovery = NsdDiscoveryManager(nsdManager, NsdDiscoveryManager.VIDEO_SERVICE_TYPE)
+        videoHostServer = VideoHostServer(applicationContext)
         connectionEngine = ConnectionEngine(applicationContext, lifecycleScope)
         connectionEngine.customDownloadFolderProvider = { cachedSettings.customDownloadFolderUri?.let(Uri::parse) }
 
@@ -184,6 +197,7 @@ class ConnectItService : LifecycleService() {
     override fun onDestroy() {
         deviceDiscovery.teardown()
         videoDiscovery.teardown()
+        videoHostServer.stop()
         connectionEngine.dispose()
         super.onDestroy()
     }
@@ -253,6 +267,31 @@ class ConnectItService : LifecycleService() {
 
     fun cancelTransfer() = connectionEngine.cancelFileTransfer()
 
+    /** 開始把 [treeUri](SAF 選取的資料夾)裡的影片分享出去,並透過 mDNS 廣播讓其他裝置找得到。 */
+    fun startVideoServer(treeUri: Uri) {
+        lifecycleScope.launch {
+            settingsRepository.setVideoShareFolderUri(treeUri.toString())
+            val name = cachedSettings.deviceName
+            val started = videoHostServer.start(treeUri, name)
+            if (started) {
+                videoDiscovery.advertise(name, videoHostServer.port)
+                _videoHostState.value = VideoHostUiState.Running(
+                    port = videoHostServer.port,
+                    videoCount = videoHostServer.manifestCount,
+                    folderName = SafUtils.displayNameOf(applicationContext, treeUri),
+                )
+            } else {
+                _videoHostState.value = VideoHostUiState.Idle
+            }
+        }
+    }
+
+    fun stopVideoServer() {
+        videoDiscovery.stopAdvertising()
+        videoHostServer.stop()
+        _videoHostState.value = VideoHostUiState.Idle
+    }
+
     // ===================== 內部事件轉接 =====================
 
     private fun wireCallbacks() {
@@ -273,6 +312,8 @@ class ConnectItService : LifecycleService() {
             _videoServers.update { list -> list.filterNot { it.key == name } }
         }
         videoDiscovery.onStatusChanged = { pushLog(it) }
+
+        videoHostServer.onStatusChanged = { pushLog(it) }
 
         connectionEngine.onStatusChanged = { pushLog(it) }
 
