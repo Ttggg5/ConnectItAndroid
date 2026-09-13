@@ -26,8 +26,6 @@ import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.service.ConnectItService
 import com.connectit.android.service.ConnectionUiState
 import com.connectit.android.ui.components.ConnectionRequestDialog
-import com.connectit.android.ui.components.FileOfferDialog
-import com.connectit.android.ui.components.FolderOfferDialog
 import com.connectit.android.ui.screens.ConnectedScreen
 import com.connectit.android.ui.screens.DevicesScreen
 import com.connectit.android.ui.screens.SettingsScreen
@@ -52,8 +50,6 @@ fun ConnectItApp(service: ConnectItService) {
 
     val connectionState by service.connectionState.collectAsState()
     val pendingConnectionRequest by service.pendingConnectionRequest.collectAsState()
-    val pendingFileOffer by service.pendingFileOffer.collectAsState()
-    val pendingFolderOffer by service.pendingFolderOffer.collectAsState()
 
     LaunchedEffect(service) {
         service.events.collect { message -> snackbarHostState.showSnackbar(message) }
@@ -128,20 +124,6 @@ fun ConnectItApp(service: ConnectItService) {
         ConnectionRequestDialog(
             request = request,
             onRespond = { accept -> service.respondToConnectionRequest(accept) },
-        )
-    }
-
-    pendingFileOffer?.let { offer ->
-        FileOfferDialog(
-            offer = offer,
-            onRespond = { accept -> service.respondToFileOffer(offer.transferId, accept) },
-        )
-    }
-
-    pendingFolderOffer?.let { offer ->
-        FolderOfferDialog(
-            offer = offer,
-            onRespond = { accept -> service.respondToFolderOffer(offer.transferId, accept) },
         )
     }
 }

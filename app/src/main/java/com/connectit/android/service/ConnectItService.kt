@@ -1,18 +1,23 @@
 package com.connectit.android.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.net.nsd.NsdManager
 import android.os.Binder
+import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import com.connectit.android.MainActivity
@@ -22,10 +27,8 @@ import com.connectit.android.discovery.NsdDiscoveryManager
 import com.connectit.android.model.ConnectedPeer
 import com.connectit.android.model.ConnectionRequest
 import com.connectit.android.model.DiscoveredDevice
-import com.connectit.android.model.FileOffer
 import com.connectit.android.model.FileTransferEnded
 import com.connectit.android.model.FolderEntry
-import com.connectit.android.model.FolderOffer
 import com.connectit.android.model.FolderTransferEnded
 import com.connectit.android.model.TransferDirection
 import com.connectit.android.model.TransferEndReason
@@ -91,12 +94,6 @@ class ConnectItService : LifecycleService() {
     private val _pendingConnectionRequest = MutableStateFlow<ConnectionRequest?>(null)
     val pendingConnectionRequest: StateFlow<ConnectionRequest?> = _pendingConnectionRequest.asStateFlow()
 
-    private val _pendingFileOffer = MutableStateFlow<FileOffer?>(null)
-    val pendingFileOffer: StateFlow<FileOffer?> = _pendingFileOffer.asStateFlow()
-
-    private val _pendingFolderOffer = MutableStateFlow<FolderOffer?>(null)
-    val pendingFolderOffer: StateFlow<FolderOffer?> = _pendingFolderOffer.asStateFlow()
-
     private val _transferState = MutableStateFlow<TransferUiState?>(null)
     val transferState: StateFlow<TransferUiState?> = _transferState.asStateFlow()
 
@@ -160,6 +157,7 @@ class ConnectItService : LifecycleService() {
     fun respondToConnectionRequest(accept: Boolean) {
         _pendingConnectionRequest.value?.respond?.invoke(accept)
         _pendingConnectionRequest.value = null
+        clearConnectionRequestNotification()
     }
 
     fun disconnectFromPeer() {
@@ -200,25 +198,6 @@ class ConnectItService : LifecycleService() {
         connectionEngine.sendFolder(folderName, entries)
     }
 
-    fun respondToFileOffer(transferId: String, accept: Boolean) {
-        val offer = _pendingFileOffer.value
-        _pendingFileOffer.value = null
-        connectionEngine.respondToFileOffer(transferId, accept)
-        if (accept && offer != null) {
-            _transferState.value = TransferUiState(offer.fileName, "接收中...", 0f)
-        }
-    }
-
-    fun respondToFolderOffer(transferId: String, accept: Boolean) {
-        val offer = _pendingFolderOffer.value
-        _pendingFolderOffer.value = null
-        connectionEngine.respondToFolderOffer(transferId, accept)
-        if (accept && offer != null) {
-            val title = if (offer.isBatch) "${offer.totalEntries} 個檔案" else offer.folderName
-            _transferState.value = TransferUiState(title, "接收中...(共 ${offer.totalEntries} 個檔案)", 0f)
-        }
-    }
-
     fun cancelTransfer() = connectionEngine.cancelFileTransfer()
 
     // ===================== 內部事件轉接 =====================
@@ -246,22 +225,39 @@ class ConnectItService : LifecycleService() {
 
         connectionEngine.onConnectionRequested = { request ->
             _pendingConnectionRequest.value = request
+            // 連線請求本身還是要使用者手動接受/拒絕(跟已經同意過的檔案傳輸不同),
+            // 但確認對話框只有 App 開著才看得到,所以額外跳一則通知提醒使用者去開 App 處理。
+            notifyConnectionRequest(request.requesterName)
         }
 
         connectionEngine.onConnected = { peer ->
             _pendingConnectionRequest.value = null
+            clearConnectionRequestNotification()
             _connectionState.value = ConnectionUiState.Connected(peer)
             pushLog("已與 ${peer.name} (${peer.address}) 建立連線。")
         }
 
         connectionEngine.onRemoteDisconnected = {
+            val peerName = (_connectionState.value as? ConnectionUiState.Connected)?.peer?.name
             _connectionState.value = ConnectionUiState.Idle
             _transferState.value = null
             pushEvent("對方已中斷連線。")
+            notifyPeerDisconnected(peerName ?: getString(R.string.notification_incoming_transfer_unknown_peer))
         }
 
-        connectionEngine.onFileOffered = { offer -> _pendingFileOffer.value = offer }
-        connectionEngine.onFolderOffered = { offer -> _pendingFolderOffer.value = offer }
+        // 連線本身已經是使用者同意過的,連線建立後的檔案/資料夾傳送不再重複跳出確認對話框,
+        // 直接接受並用系統通知讓使用者知道有東西正在傳進來(尤其是 App 在背景時)。
+        connectionEngine.onFileOffered = { offer ->
+            connectionEngine.respondToFileOffer(offer.transferId, true)
+            _transferState.value = TransferUiState(offer.fileName, "接收中...", 0f)
+            notifyIncomingTransfer(offer.fileName)
+        }
+        connectionEngine.onFolderOffered = { offer ->
+            connectionEngine.respondToFolderOffer(offer.transferId, true)
+            val title = if (offer.isBatch) "${offer.totalEntries} 個檔案" else offer.folderName
+            _transferState.value = TransferUiState(title, "接收中...(共 ${offer.totalEntries} 個檔案)", 0f)
+            notifyIncomingTransfer(title)
+        }
 
         connectionEngine.onFileTransferProgress = { p ->
             _transferState.update { current ->
@@ -283,14 +279,14 @@ class ConnectItService : LifecycleService() {
         }
 
         connectionEngine.onFileTransferEnded = { ended ->
-            if (_pendingFileOffer.value?.transferId == ended.transferId) _pendingFileOffer.value = null
             _transferState.value = null
+            clearIncomingTransferNotification()
             pushEvent(formatFileEndedMessage(ended))
         }
 
         connectionEngine.onFolderTransferEnded = { ended ->
-            if (_pendingFolderOffer.value?.transferId == ended.transferId) _pendingFolderOffer.value = null
             _transferState.value = null
+            clearIncomingTransferNotification()
             pushEvent(formatFolderEndedMessage(ended))
         }
     }
@@ -366,6 +362,16 @@ class ConnectItService : LifecycleService() {
         val channel = NotificationChannel(CHANNEL_ID, getString(R.string.notification_channel_name), NotificationManager.IMPORTANCE_LOW)
         manager.createNotificationChannel(channel)
 
+        // 傳輸提議/對方斷線不再跳確認對話框或需要開著 App 才看得到(連線本身已經是使用者
+        // 同意過的),改用這個獨立頻道即時通知使用者。必須是 IMPORTANCE_HIGH 才會跳出橫幅
+        // (heads-up)提醒,IMPORTANCE_DEFAULT 只會安靜地躺在通知欄裡。頻道一旦建立,之後改
+        // 重要性不會生效(系統只認第一次建立時的設定,使用者要自己去系統設定調整),所以這裡
+        // 用新的頻道 ID,避免舊版本(當初用 IMPORTANCE_DEFAULT 建立過)裝置上的使用者永遠看不到橫幅。
+        val alertChannel = NotificationChannel(
+            ALERT_CHANNEL_ID, getString(R.string.notification_alert_channel_name), NotificationManager.IMPORTANCE_HIGH,
+        )
+        manager.createNotificationChannel(alertChannel)
+
         val contentIntent = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
@@ -381,8 +387,94 @@ class ConnectItService : LifecycleService() {
             .build()
     }
 
+    private fun mainActivityIntent(): PendingIntent = PendingIntent.getActivity(
+        this, 0, Intent(this, MainActivity::class.java),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+
+    /**
+     * 檢查權限並發出通知,兩者必須寫在同一個函式裡——lint 的 MissingPermission 檢查只認得
+     * 「檢查跟呼叫在同一段程式碼裡」這種寫法,拆到另一個函式(例如 hasPermission())它就認不出來了。
+     */
+    private fun postAlertNotification(id: Int, notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            // 使用者拒絕了通知權限,安靜地放棄——對應的功能(自動接受傳輸/斷線處理)不受影響。
+            return
+        }
+        NotificationManagerCompat.from(this).notify(id, notification)
+    }
+
+    /** 收到檔案/資料夾提議並自動接受時呼叫,讓使用者(尤其是 App 在背景時)知道現在有東西傳進來。 */
+    private fun notifyIncomingTransfer(itemName: String) {
+        val peerName = (_connectionState.value as? ConnectionUiState.Connected)?.peer?.name
+            ?: getString(R.string.notification_incoming_transfer_unknown_peer)
+
+        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setContentTitle(getString(R.string.notification_incoming_transfer_title, peerName))
+            .setContentText(itemName)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(mainActivityIntent())
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            // 對應頻道的 IMPORTANCE_HIGH:pre-Oreo 裝置沒有頻道概念,重要性完全看這裡設的
+            // PRIORITY_HIGH 才會跳橫幅。Oreo 以上頻道的設定才是真正生效的來源,這裡是保險。
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+
+        postAlertNotification(TRANSFER_NOTIFICATION_ID, notification)
+    }
+
+    private fun clearIncomingTransferNotification() {
+        NotificationManagerCompat.from(this).cancel(TRANSFER_NOTIFICATION_ID)
+    }
+
+    /** 對方中斷連線時呼叫(非本機主動斷線),讓使用者(尤其是 App 在背景時)知道連線已經斷了。 */
+    private fun notifyPeerDisconnected(peerName: String) {
+        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setContentTitle(getString(R.string.notification_peer_disconnected_title, peerName))
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(mainActivityIntent())
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+
+        postAlertNotification(DISCONNECTED_NOTIFICATION_ID, notification)
+    }
+
+    /**
+     * 有裝置送出連線請求時呼叫。連線請求跟已經同意過的檔案傳輸不同,還是需要使用者手動
+     * 接受/拒絕,但確認對話框只有 App 開著才看得到,所以用通知提醒使用者去開 App 處理。
+     */
+    private fun notifyConnectionRequest(requesterName: String) {
+        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setContentTitle(getString(R.string.notification_connection_request_title, requesterName))
+            .setContentText(getString(R.string.notification_connection_request_text))
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(mainActivityIntent())
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+
+        postAlertNotification(CONNECTION_REQUEST_NOTIFICATION_ID, notification)
+    }
+
+    private fun clearConnectionRequestNotification() {
+        NotificationManagerCompat.from(this).cancel(CONNECTION_REQUEST_NOTIFICATION_ID)
+    }
+
     companion object {
         private const val CHANNEL_ID = "connectit_service"
         private const val NOTIFICATION_ID = 1
+        // v2:原本只用來發傳輸提議通知、用 IMPORTANCE_DEFAULT 建立過,現在改成 IMPORTANCE_HIGH
+        // 才能跳橫幅,也擴大用途涵蓋斷線通知。頻道 ID 一樣的話系統會沿用舊設定,所以要換一個
+        // 新 ID 才會在已安裝過的裝置上真正生效。
+        private const val ALERT_CHANNEL_ID = "connectit_alerts_v2"
+        private const val TRANSFER_NOTIFICATION_ID = 2
+        private const val DISCONNECTED_NOTIFICATION_ID = 3
+        private const val CONNECTION_REQUEST_NOTIFICATION_ID = 4
     }
 }
