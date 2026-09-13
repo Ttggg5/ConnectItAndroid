@@ -203,6 +203,8 @@ class ConnectionEngine(
     }
 
     private fun becomeConnected(socket: Socket, name: String, address: String) {
+        // 避免 TCP Nagle 演算法延遲小封包送出——與對方的 delayed ACK 交互作用下會嚴重拖慢傳輸速度。
+        runCatching { socket.tcpNoDelay = true }
         activeSocket = socket
         startMonitoring(socket)
         onConnected?.invoke(ConnectedPeer(name, address))

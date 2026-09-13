@@ -59,17 +59,23 @@ private fun readExact(input: InputStream, buffer: ByteArray, allowLeadingEof: Bo
     return true
 }
 
-/** 呼叫端(ConnectionService)負責用鎖保護同一個 socket 的並行寫入,這裡不做同步。 */
+/**
+ * 呼叫端(ConnectionService)負責用鎖保護同一個 socket 的並行寫入,這裡不做同步。
+ *
+ * header/type/payload 合併成單一緩衝區一次寫入,避免拆成多次小的 write() 呼叫各自送出
+ * 獨立封包——在 TCP Nagle 演算法與對方 delayed ACK 交互作用下,那樣每個小封包都可能
+ * 多花數十毫秒,嚴重拖慢傳輸速度。
+ */
 fun writeFrame(output: OutputStream, type: Int, payload: ByteArray, offset: Int = 0, length: Int = payload.size) {
-    val header = ByteArray(4)
     val total = length + 1
-    header[0] = ((total ushr 24) and 0xFF).toByte()
-    header[1] = ((total ushr 16) and 0xFF).toByte()
-    header[2] = ((total ushr 8) and 0xFF).toByte()
-    header[3] = (total and 0xFF).toByte()
+    val frame = ByteArray(4 + total)
+    frame[0] = ((total ushr 24) and 0xFF).toByte()
+    frame[1] = ((total ushr 16) and 0xFF).toByte()
+    frame[2] = ((total ushr 8) and 0xFF).toByte()
+    frame[3] = (total and 0xFF).toByte()
+    frame[4] = type.toByte()
+    System.arraycopy(payload, offset, frame, 5, length)
 
-    output.write(header)
-    output.write(type)
-    output.write(payload, offset, length)
+    output.write(frame)
     output.flush()
 }
