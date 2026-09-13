@@ -6,15 +6,20 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.view.LayoutInflater
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,12 +33,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Card
@@ -42,12 +49,14 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -59,6 +68,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -125,10 +136,24 @@ fun VideoPlayerScreen(
     var volume by remember { mutableStateOf(1f) }
     var mutedVolume by remember { mutableStateOf<Float?>(null) }
     var speed by remember { mutableStateOf(1f) }
-    var speedMenuExpanded by remember { mutableStateOf(false) }
     var isFullscreen by remember { mutableStateOf(false) }
     var countdownSeconds by remember { mutableStateOf<Int?>(null) }
     var countdownJob by remember { mutableStateOf<Job?>(null) }
+
+    // 控制列疊在影片上,只有「滑鼠移到影片上/點擊影片/影片暫停」才顯示,對應網頁版
+    // BuildWatchPageScript 的 showControls() 邏輯:播放中沒有互動就在一段時間後淡出。
+    var controlsVisible by remember { mutableStateOf(true) }
+    var controlsInteractionTick by remember { mutableStateOf(0) }
+    fun showControls() {
+        controlsVisible = true
+        controlsInteractionTick++
+    }
+    LaunchedEffect(controlsInteractionTick, isPlaying) {
+        if (isPlaying) {
+            delay(2_500)
+            controlsVisible = false
+        }
+    }
 
     fun videoKey(entry: VideoManifestEntry) = "${server.host}:${server.port}/${entry.relativePath}"
 
@@ -322,8 +347,18 @@ fun VideoPlayerScreen(
                             Modifier.fillMaxWidth().aspectRatio(16f / 9f)
                         },
                     ) {
+                        val videoInteractionSource = remember { MutableInteractionSource() }
+                        val isVideoHovered by videoInteractionSource.collectIsHoveredAsState()
+                        LaunchedEffect(isVideoHovered) { if (isVideoHovered) showControls() }
+
                         AndroidView(
-                            modifier = Modifier.fillMaxSize().clickable { togglePlayPause() },
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .hoverable(videoInteractionSource)
+                                .clickable(
+                                    interactionSource = videoInteractionSource,
+                                    indication = null,
+                                ) { showControls() },
                             factory = { ctx ->
                                 (LayoutInflater.from(ctx).inflate(R.layout.view_video_player, null) as PlayerView).apply {
                                     player = exoPlayer
@@ -333,7 +368,9 @@ fun VideoPlayerScreen(
 
                         countdownSeconds?.let { seconds ->
                             Card(
-                                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                                // 控制列現在疊在影片底部,倒數卡片要多留一點底部空間才不會被蓋住
+                                // (跟網頁版把 .next-overlay 往上挪、避開疊加控制列的道理一樣)。
+                                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, top = 16.dp, bottom = 96.dp),
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
@@ -344,6 +381,62 @@ fun VideoPlayerScreen(
                                     TextButton(onClick = { cancelCountdown() }) { Text("取消") }
                                 }
                             }
+                        }
+
+                        // 這裡同時處在 Box 和外層 Column 的作用域裡,BoxScope/ColumnScope 都各自有一份
+                        // 簽章相同的 AnimatedVisibility 擴充函式,implicit receiver 沒辦法自動判斷要用
+                        // 哪一個,所以用完整路徑指名呼叫最基本、不吃 receiver 的那個多載版本。
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = controlsVisible || !isPlaying,
+                            enter = fadeIn(),
+                            exit = fadeOut(),
+                            modifier = Modifier.align(Alignment.BottomCenter),
+                        ) {
+                            VideoControls(
+                                isPlaying = isPlaying,
+                                positionMs = positionMs,
+                                durationMs = durationMs,
+                                isSeeking = isSeeking,
+                                seekPreviewFraction = seekPreviewFraction,
+                                onSeekChange = { showControls(); isSeeking = true; seekPreviewFraction = it },
+                                onSeekFinished = {
+                                    exoPlayer.seekTo((seekPreviewFraction * durationMs).toLong())
+                                    isSeeking = false
+                                },
+                                hasPrevious = currentIndex > 0,
+                                hasNext = currentIndex < entries.size - 1,
+                                onPrevious = { showControls(); playIndex(currentIndex - 1) },
+                                onNext = { showControls(); playIndex(currentIndex + 1) },
+                                onRewind = {
+                                    showControls()
+                                    exoPlayer.seekTo((exoPlayer.currentPosition - SkipDurationMs).coerceAtLeast(0L))
+                                },
+                                onForward = {
+                                    showControls()
+                                    val max = durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE
+                                    exoPlayer.seekTo((exoPlayer.currentPosition + SkipDurationMs).coerceAtMost(max))
+                                },
+                                onPlayPause = { showControls(); togglePlayPause() },
+                                autoplayNext = autoplayNext,
+                                onAutoplayNextChange = { checked ->
+                                    showControls()
+                                    autoplayNext = checked
+                                    scope.launch { prefs.setAutoplayNext(checked) }
+                                    if (!checked) cancelCountdown()
+                                },
+                                speed = speed,
+                                onSpeedChange = { option ->
+                                    showControls()
+                                    speed = option
+                                    exoPlayer.setPlaybackSpeed(option)
+                                    scope.launch { prefs.setSpeed(option) }
+                                },
+                                volume = volume,
+                                onVolumeChange = { showControls(); setVolumeAndPersist(it) },
+                                onToggleMute = { showControls(); toggleMute() },
+                                isFullscreen = isFullscreen,
+                                onToggleFullscreen = { showControls(); applyFullscreen(!isFullscreen) },
+                            )
                         }
                     }
 
@@ -356,46 +449,6 @@ fun VideoPlayerScreen(
                             )
                         }
                     }
-
-                    VideoControls(
-                        isPlaying = isPlaying,
-                        positionMs = positionMs,
-                        durationMs = durationMs,
-                        isSeeking = isSeeking,
-                        seekPreviewFraction = seekPreviewFraction,
-                        onSeekChange = { isSeeking = true; seekPreviewFraction = it },
-                        onSeekFinished = {
-                            exoPlayer.seekTo((seekPreviewFraction * durationMs).toLong())
-                            isSeeking = false
-                        },
-                        hasPrevious = currentIndex > 0,
-                        hasNext = currentIndex < entries.size - 1,
-                        onPrevious = { playIndex(currentIndex - 1) },
-                        onNext = { playIndex(currentIndex + 1) },
-                        onRewind = { exoPlayer.seekTo((exoPlayer.currentPosition - SkipDurationMs).coerceAtLeast(0L)) },
-                        onForward = {
-                            val max = durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE
-                            exoPlayer.seekTo((exoPlayer.currentPosition + SkipDurationMs).coerceAtMost(max))
-                        },
-                        onPlayPause = { togglePlayPause() },
-                        autoplayNext = autoplayNext,
-                        onAutoplayNextChange = { checked ->
-                            autoplayNext = checked
-                            scope.launch { prefs.setAutoplayNext(checked) }
-                            if (!checked) cancelCountdown()
-                        },
-                        speed = speed,
-                        onSpeedChange = { option ->
-                            speed = option
-                            exoPlayer.setPlaybackSpeed(option)
-                            scope.launch { prefs.setSpeed(option) }
-                        },
-                        volume = volume,
-                        onVolumeChange = { setVolumeAndPersist(it) },
-                        onToggleMute = { toggleMute() },
-                        isFullscreen = isFullscreen,
-                        onToggleFullscreen = { applyFullscreen(!isFullscreen) },
-                    )
                 }
             }
 
@@ -443,82 +496,111 @@ private fun VideoControls(
     isFullscreen: Boolean,
     onToggleFullscreen: () -> Unit,
 ) {
-    var speedMenuExpanded by remember { mutableStateOf(false) }
+    var settingsMenuExpanded by remember { mutableStateOf(false) }
 
-    Column(modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(8.dp)) {
-        Slider(
-            value = if (isSeeking) seekPreviewFraction else fractionOf(positionMs, durationMs),
-            onValueChange = onSeekChange,
-            onValueChangeFinished = onSeekFinished,
-        )
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onPrevious, enabled = hasPrevious) {
-                Icon(Icons.Filled.SkipPrevious, contentDescription = "上一部")
-            }
-            IconButton(onClick = onRewind) {
-                Icon(Icons.Filled.FastRewind, contentDescription = "倒退 10 秒")
-            }
-            IconButton(onClick = onPlayPause) {
-                Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = "播放/暫停")
-            }
-            IconButton(onClick = onForward) {
-                Icon(Icons.Filled.FastForward, contentDescription = "快轉 10 秒")
-            }
-            IconButton(onClick = onNext, enabled = hasNext) {
-                Icon(Icons.Filled.SkipNext, contentDescription = "下一部")
-            }
-            Text(
-                "${formatDuration(positionMs)} / ${formatDuration(durationMs)}",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(horizontal = 4.dp),
-            )
-        }
-
-        FlowRow(
-            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+    CompositionLocalProvider(LocalContentColor provides Color.White) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        0f to Color.Transparent,
+                        1f to Color.Black.copy(alpha = 0.85f),
+                    ),
+                )
+                .padding(start = 8.dp, end = 8.dp, top = 24.dp, bottom = 8.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = autoplayNext, onCheckedChange = onAutoplayNextChange)
-                Text("自動播放下一部", style = MaterialTheme.typography.bodySmall)
-            }
+            Slider(
+                value = if (isSeeking) seekPreviewFraction else fractionOf(positionMs, durationMs),
+                onValueChange = onSeekChange,
+                onValueChangeFinished = onSeekFinished,
+            )
 
-            Box {
-                TextButton(onClick = { speedMenuExpanded = true }) { Text("${speed}x") }
-                DropdownMenu(expanded = speedMenuExpanded, onDismissRequest = { speedMenuExpanded = false }) {
-                    SpeedOptions.forEach { option ->
-                        DropdownMenuItem(
-                            text = { Text("${option}x") },
-                            onClick = {
-                                onSpeedChange(option)
-                                speedMenuExpanded = false
-                            },
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                IconButton(onClick = onPrevious, enabled = hasPrevious) {
+                    Icon(Icons.Filled.SkipPrevious, contentDescription = "上一部")
+                }
+                IconButton(onClick = onRewind) {
+                    Icon(Icons.Filled.FastRewind, contentDescription = "倒退 10 秒")
+                }
+                IconButton(onClick = onPlayPause) {
+                    Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = "播放/暫停")
+                }
+                IconButton(onClick = onForward) {
+                    Icon(Icons.Filled.FastForward, contentDescription = "快轉 10 秒")
+                }
+                IconButton(onClick = onNext, enabled = hasNext) {
+                    Icon(Icons.Filled.SkipNext, contentDescription = "下一部")
+                }
+                Text(
+                    "${formatDuration(positionMs)} / ${formatDuration(durationMs)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                // 音量、自動播放下一部、播放速度都收進同一個「設定」選單,對應網頁版把這三個
+                // 選項合併進單一齒輪圖示下拉選單的做法。
+                Box {
+                    IconButton(onClick = { settingsMenuExpanded = true }) {
+                        Icon(Icons.Filled.Settings, contentDescription = "設定")
+                    }
+                    DropdownMenu(expanded = settingsMenuExpanded, onDismissRequest = { settingsMenuExpanded = false }) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        ) {
+                            IconButton(onClick = onToggleMute) {
+                                Icon(
+                                    if (volume <= 0f) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                                    contentDescription = "靜音",
+                                )
+                            }
+                            Slider(
+                                value = volume,
+                                onValueChange = onVolumeChange,
+                                modifier = Modifier.width(140.dp),
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onAutoplayNextChange(!autoplayNext) }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text("自動播放下一部")
+                            Checkbox(checked = autoplayNext, onCheckedChange = onAutoplayNextChange)
+                        }
+
+                        Text(
+                            "播放速度",
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                         )
+                        SpeedOptions.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text("${option}x") },
+                                onClick = { onSpeedChange(option) },
+                                leadingIcon = if (option == speed) {
+                                    { Icon(Icons.Filled.Check, contentDescription = null) }
+                                } else {
+                                    null
+                                },
+                            )
+                        }
                     }
                 }
-            }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onToggleMute) {
+                IconButton(onClick = onToggleFullscreen) {
                     Icon(
-                        if (volume <= 0f) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
-                        contentDescription = "靜音",
+                        if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                        contentDescription = "全螢幕",
                     )
                 }
-                Slider(
-                    value = volume,
-                    onValueChange = onVolumeChange,
-                    modifier = Modifier.width(100.dp),
-                )
-            }
-
-            IconButton(onClick = onToggleFullscreen) {
-                Icon(
-                    if (isFullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                    contentDescription = "全螢幕",
-                )
             }
         }
     }
