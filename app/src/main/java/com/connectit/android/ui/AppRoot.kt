@@ -39,6 +39,7 @@ import com.connectit.android.ui.components.ConnectionRequestDialog
 import com.connectit.android.ui.screens.ConnectedScreen
 import com.connectit.android.ui.screens.DevicesScreen
 import com.connectit.android.ui.screens.SettingsScreen
+import com.connectit.android.ui.screens.VideoHostControlScreen
 import com.connectit.android.ui.screens.VideoPlayerScreen
 import com.connectit.android.ui.screens.VideoScreen
 import com.connectit.android.ui.screens.VideoServerScreen
@@ -54,8 +55,14 @@ private val RailIconSize = 32.dp
 /** 「影片」頁的子導覽:選伺服器 -> 看清單(向對方要 manifest)-> 播放。 */
 private sealed interface VideoNav {
     data object Root : VideoNav
+    data object HostControl : VideoNav
     data class Manifest(val server: DiscoveredDevice) : VideoNav
-    data class Player(val server: DiscoveredDevice, val entries: List<VideoManifestEntry>, val startIndex: Int) : VideoNav
+    data class Player(
+        val server: DiscoveredDevice,
+        val entries: List<VideoManifestEntry>,
+        val startIndex: Int,
+        val remoteControlHint: Boolean,
+    ) : VideoNav
 }
 
 @Composable
@@ -72,11 +79,20 @@ fun ConnectItApp(service: ConnectItService) {
     }
 
     when (val nav = videoNav) {
+        VideoNav.HostControl -> {
+            VideoHostControlScreen(
+                service = service,
+                onBack = { videoNav = VideoNav.Root },
+            )
+            return
+        }
         is VideoNav.Manifest -> {
             VideoServerScreen(
                 server = nav.server,
                 onBack = { videoNav = VideoNav.Root },
-                onPlay = { entries, startIndex -> videoNav = VideoNav.Player(nav.server, entries, startIndex) },
+                onPlay = { entries, startIndex, remoteControlEnabled ->
+                    videoNav = VideoNav.Player(nav.server, entries, startIndex, remoteControlEnabled)
+                },
             )
             return
         }
@@ -85,7 +101,9 @@ fun ConnectItApp(service: ConnectItService) {
                 server = nav.server,
                 entries = nav.entries,
                 startIndex = nav.startIndex,
+                remoteControlHint = nav.remoteControlHint,
                 onBack = { videoNav = VideoNav.Manifest(nav.server) },
+                onExitRemoteControl = { videoNav = VideoNav.Root },
             )
             return
         }
@@ -123,6 +141,7 @@ fun ConnectItApp(service: ConnectItService) {
                     snackbarHostState = snackbarHostState,
                     bottomBar = null,
                     onWatch = { server -> videoNav = VideoNav.Manifest(server) },
+                    onOpenHostControl = { videoNav = VideoNav.HostControl },
                 )
             }
         } else {
@@ -145,6 +164,7 @@ fun ConnectItApp(service: ConnectItService) {
                     }
                 },
                 onWatch = { server -> videoNav = VideoNav.Manifest(server) },
+                onOpenHostControl = { videoNav = VideoNav.HostControl },
             )
         }
     }
@@ -172,6 +192,7 @@ private fun MainScaffold(
     snackbarHostState: SnackbarHostState,
     bottomBar: (@Composable () -> Unit)?,
     onWatch: (DiscoveredDevice) -> Unit,
+    onOpenHostControl: () -> Unit,
 ) {
     Scaffold(
         modifier = modifier,
@@ -192,6 +213,7 @@ private fun MainScaffold(
                 service = service,
                 modifier = contentModifier,
                 onWatch = onWatch,
+                onOpenHostControl = onOpenHostControl,
             )
             AppTab.SETTINGS -> SettingsScreen(service = service, modifier = contentModifier)
         }

@@ -86,6 +86,7 @@ import coil.compose.AsyncImage
 import com.connectit.android.R
 import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
+import com.connectit.android.net.fetchControlState
 import com.connectit.android.net.videoMediaUrl
 import com.connectit.android.net.videoThumbnailUrl
 import com.connectit.android.repo.PlaybackPreferences
@@ -117,6 +118,12 @@ fun VideoPlayerScreen(
     entries: List<VideoManifestEntry>,
     startIndex: Int,
     onBack: () -> Unit,
+    /** 遠端控制模式中返回時要去的地方(app 的「影片」主頁籤),不是回到這個主機的清單/瀏覽畫面
+     * (見 [onBack])——遠端控制模式下不該讓觀眾回得去那個瀏覽畫面,道理跟不該顯示網站首頁清單一樣。 */
+    onExitRemoteControl: () -> Unit,
+    /** 進入畫面前(來自 manifest)對「主機是否開了遠端控制模式」的初步提示,只用來避免掛載瞬間
+     * 先閃一下自由控制列——真正即時、會持續更新的判斷來自下面對 `/control/state` 的輪詢。 */
+    remoteControlHint: Boolean = false,
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -139,6 +146,12 @@ fun VideoPlayerScreen(
     var isFullscreen by remember { mutableStateOf(false) }
     var countdownSeconds by remember { mutableStateOf<Int?>(null) }
     var countdownJob by remember { mutableStateOf<Job?>(null) }
+
+    // 遠端控制模式:主機正在控制播放時鎖住手動控制列,改成跟隨輪詢到的狀態播放(見下方
+    // fetchControlState 的輪詢迴圈)。remoteControlHint 只是掛載時的初始值,實際狀態一律以
+    // 輪詢結果為準,主機隨時可能開關這個模式。
+    var remoteEnabled by remember { mutableStateOf(remoteControlHint) }
+    var lastRemoteResyncAt by remember { mutableStateOf(0L) }
 
     // 控制列疊在影片上,只有「滑鼠移到影片上/點擊影片/影片暫停」才顯示,對應網頁版
     // BuildWatchPageScript 的 showControls() 邏輯:播放中沒有互動就在一段時間後淡出。
@@ -175,10 +188,14 @@ fun VideoPlayerScreen(
         exoPlayer.setMediaItem(mediaItem)
         exoPlayer.prepare()
         exoPlayer.playWhenReady = true
-        scope.launch {
-            val saved = prefs.getPosition(videoKey(entry))
-            if (saved != null && saved > 5_000L) {
-                exoPlayer.seekTo(saved)
+        // 遠端控制模式下,播放位置由主機的狀態決定(見輪詢迴圈),不要用這個使用者自己
+        // 上次留下的記錄蓋掉它。
+        if (!remoteEnabled) {
+            scope.launch {
+                val saved = prefs.getPosition(videoKey(entry))
+                if (saved != null && saved > 5_000L) {
+                    exoPlayer.seekTo(saved)
+                }
             }
         }
     }
@@ -296,6 +313,57 @@ fun VideoPlayerScreen(
         }
     }
 
+    // 遠端控制模式:不管目前 remoteEnabled 是不是 true,都持續輪詢主機的 `/control/state`——
+    // 這樣主機把模式關掉時,這裡下一輪就會自動偵測到並讓使用者恢復自由控制,不需要另外處理。
+    LaunchedEffect(server) {
+        while (isActive) {
+            val state = fetchControlState(server.host, server.port)
+            if (state != null) {
+                remoteEnabled = state.enabled
+                if (state.enabled) {
+                    val targetIndex = state.videoRelativePath
+                        ?.let { path -> entries.indexOfFirst { it.relativePath == path } }
+                        ?.takeIf { it >= 0 }
+                    if (targetIndex != null && targetIndex != currentIndex) {
+                        playIndex(targetIndex)
+                    }
+
+                    if (state.isPlaying && !exoPlayer.isPlaying) {
+                        exoPlayer.play()
+                    } else if (!state.isPlaying && exoPlayer.isPlaying) {
+                        exoPlayer.pause()
+                    }
+
+                    val cooldownActive = System.currentTimeMillis() - lastRemoteResyncAt < 1_000L
+                    if (!cooldownActive && kotlin.math.abs(exoPlayer.currentPosition - state.positionMs) > 1_500L) {
+                        val duration = exoPlayer.duration
+                        val target = if (duration > 0) state.positionMs.coerceIn(0L, duration) else state.positionMs.coerceAtLeast(0L)
+                        exoPlayer.seekTo(target)
+                        lastRemoteResyncAt = System.currentTimeMillis()
+                    }
+
+                    // 遠端控制中,音量/靜音/播放速度也一併跟主機同步(控制列被鎖住了,觀眾本來
+                    // 就不能自己調),跟網頁版 applyRemoteState 的做法一致。
+                    if (exoPlayer.playbackParameters.speed != state.playbackRate.toFloat()) {
+                        exoPlayer.setPlaybackSpeed(state.playbackRate.toFloat())
+                    }
+                    val targetVolume = if (state.muted) 0f else state.volume.toFloat()
+                    if (kotlin.math.abs(exoPlayer.volume - targetVolume) > 0.001f) {
+                        exoPlayer.volume = targetVolume
+                    }
+                }
+            }
+            delay(800)
+        }
+    }
+
+    // 進入/離開遠端控制模式時自動切換全螢幕(對應網頁版在同一時機呼叫 requestFullscreen)——
+    // 只在 remoteEnabled 真的改變時觸發一次,不會每次輪詢都重新蓋掉使用者之後手動切回/切出
+    // 全螢幕的選擇(例如遠端模式中使用者按返回鍵退出全螢幕,下一輪輪詢不會又把它拉回全螢幕)。
+    LaunchedEffect(remoteEnabled) {
+        applyFullscreen(remoteEnabled)
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             val entry = entries.getOrNull(currentIndex)
@@ -307,10 +375,18 @@ fun VideoPlayerScreen(
         }
     }
 
+    fun navigateBack() {
+        if (remoteEnabled) onExitRemoteControl() else onBack()
+    }
+
     BackHandler {
         when {
+            // 遠端控制模式中沒有任何可操作的控制列可以留在原地用,離開全螢幕沒有意義,
+            // 所以不管目前是不是全螢幕,退出的動作一律直接送回 app 的影片頁,不用先跳出
+            // 全螢幕、再按一次才真的離開這兩步(一般非遠端模式仍維持原本兩步的行為)。
+            remoteEnabled -> navigateBack()
             isFullscreen -> applyFullscreen(false)
-            else -> onBack()
+            else -> navigateBack()
         }
     }
 
@@ -322,7 +398,7 @@ fun VideoPlayerScreen(
                 TopAppBar(
                     title = { Text(currentEntry?.name ?: server.displayName, maxLines = 1) },
                     navigationIcon = {
-                        IconButton(onClick = onBack) {
+                        IconButton(onClick = ::navigateBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                         }
                     },
@@ -387,7 +463,7 @@ fun VideoPlayerScreen(
                         // 簽章相同的 AnimatedVisibility 擴充函式,implicit receiver 沒辦法自動判斷要用
                         // 哪一個,所以用完整路徑指名呼叫最基本、不吃 receiver 的那個多載版本。
                         androidx.compose.animation.AnimatedVisibility(
-                            visible = controlsVisible || !isPlaying,
+                            visible = !remoteEnabled && (controlsVisible || !isPlaying),
                             enter = fadeIn(),
                             exit = fadeOut(),
                             modifier = Modifier.align(Alignment.BottomCenter),

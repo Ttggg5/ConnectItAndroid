@@ -137,7 +137,48 @@ object VideoHostPages {
         .next-overlay[hidden]{display:none;}
         .next-overlay span{font-size:13px;}
         .next-overlay button{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;}
+
+        .player-wrap.remote-controlled .controls{display:none;}
+
+        /* 遠端控制中改成劇院模式(不一定拿得到瀏覽器原生全螢幕權限,因為是輪詢回應後才觸發、
+           不是使用者直接點擊觸發,不算「使用者手勢」——所以額外用純 CSS 讓播放區塊佔滿整個
+           版面當作保底,真正的全螢幕 API 有成功的話畫面也不會衝突。) */
+        body.remote-fullscreen header{display:none;}
+        body.remote-fullscreen main.watch{grid-template-columns:minmax(0,1fr);max-width:none;padding:0;gap:0;}
+        body.remote-fullscreen main.watch .sidebar{display:none;}
+        body.remote-fullscreen main.watch h1,body.remote-fullscreen main.watch .primary>.meta{display:none;}
+        body.remote-fullscreen .player-fullscreen-wrap{height:100vh;}
+        body.remote-fullscreen .player-wrap{border-radius:0;height:100%;display:flex;align-items:center;justify-content:center;}
+        body.remote-fullscreen .player-wrap video{max-height:100vh;height:100vh;}
+
+        .waiting-page{display:flex;align-items:center;justify-content:center;height:100vh;text-align:center;padding:24px;}
+        .waiting-page p{font-size:16px;color:#ccc;}
         """.trimIndent()
+
+    /** 遠端控制模式已開啟、但主機還沒選任何影片時顯示——不能讓觀眾自己從首頁清單挑,只能等主機
+     * 選好,這裡定期輪詢 `/control/state`,一有影片就自動跳轉過去。 */
+    fun buildRemoteWaitingPageHtml(serverName: String): String {
+        val title = htmlEncode(serverName)
+        return """
+            <!doctype html>
+            <html lang="zh-Hant">
+            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>$title</title>
+            <style>$SHARED_CSS</style></head>
+            <body>
+              <main class="waiting-page"><p>遙控模式已開啟,等待主機選擇影片…</p></main>
+              <script>
+                setInterval(function () {
+                  fetch('/control/state').then(function (r) { return r.json(); }).then(function (state) {
+                    if (!state || !state.Enabled) { location.href = '/'; return; }
+                    if (state.VideoRelativePath) { location.href = '/watch?path=' + encodeURIComponent(state.VideoRelativePath); }
+                  }).catch(function () {});
+                }, 800);
+              </script>
+            </body>
+            </html>
+            """.trimIndent()
+    }
 
     private fun buildSortSelectHtml(selected: String, onChangeUrlPrefix: String): String {
         val options = VideoSort.entries.joinToString("\n") { option ->
@@ -231,7 +272,13 @@ object VideoHostPages {
             """.trimIndent()
     }
 
-    fun buildWatchPageHtml(manifest: List<HostManifestEntry>, serverName: String, index: Int, sort: VideoSort): String {
+    fun buildWatchPageHtml(
+        manifest: List<HostManifestEntry>,
+        serverName: String,
+        index: Int,
+        sort: VideoSort,
+        controlSnapshot: PlaybackControlState.Snapshot,
+    ): String {
         val entry = manifest[index]
         val order = displayOrder(manifest, sort)
         val position = order.indexOf(index)
@@ -259,6 +306,7 @@ object VideoHostPages {
         val sortJson = org.json.JSONObject.quote(sort.value).replace("</", "<\\/")
         val prevIndexJson = prevIndex?.toString() ?: "null"
         val nextIndexJson = nextIndex?.toString() ?: "null"
+        val controlStateJson = controlSnapshot.toJson().toString().replace("</", "<\\/")
 
         return """
             <!doctype html>
@@ -319,7 +367,7 @@ object VideoHostPages {
                 $sidebar
               </main>
               <script>$BACK_TO_HOME_TRAP_SCRIPT</script>
-              <script>${buildWatchPageScript(relativePathJson, prevIndexJson, nextIndexJson, sortJson)}</script>
+              <script>${buildWatchPageScript(relativePathJson, prevIndexJson, nextIndexJson, sortJson, controlStateJson)}</script>
             </body>
             </html>
             """.trimIndent()
@@ -352,10 +400,17 @@ object VideoHostPages {
             }
         }
 
-    private fun buildWatchPageScript(relativePathJson: String, prevIndexJson: String, nextIndexJson: String, sortJson: String): String = """
+    private fun buildWatchPageScript(
+        relativePathJson: String,
+        prevIndexJson: String,
+        nextIndexJson: String,
+        sortJson: String,
+        controlStateJson: String,
+    ): String = """
         (function () {
           var meta = { relativePath: $relativePathJson, prevIndex: $prevIndexJson, nextIndex: $nextIndexJson, sort: $sortJson };
           function watchUrl(index) { return '/watch?v=' + index + '&sort=' + meta.sort; }
+          function watchUrlForPath(path) { return '/watch?path=' + encodeURIComponent(path) + '&sort=' + meta.sort; }
           var ICON_PLAY = '${svg(Icons.PLAY_ARROW)}';
           var ICON_PAUSE = '${svg(Icons.PAUSE)}';
           var ICON_VOLUME_UP = '${svg(Icons.VOLUME_UP)}';
@@ -551,6 +606,61 @@ object VideoHostPages {
             else if (e.key === 'f' || e.key === 'F') { fsBtn.click(); }
             else if (e.key === 'm' || e.key === 'M') { muteBtn.click(); }
           });
+
+          // ===== 遠端控制模式:主機正在控制播放時,鎖住手動控制列,改成跟隨輪詢到的狀態播放 =====
+          var REMOTE_POLL_MS = 800;
+          var REMOTE_DRIFT_THRESHOLD_SEC = 1.5;
+          var REMOTE_RESYNC_COOLDOWN_MS = 1000;
+          var remoteEnabled = false;
+          var lastResyncAt = 0;
+
+          function applyRemoteState(state) {
+            if (!state || !state.Enabled) {
+              if (remoteEnabled) {
+                remoteEnabled = false;
+                playerWrap.classList.remove('remote-controlled');
+                document.body.classList.remove('remote-fullscreen');
+                if (document.fullscreenElement) { document.exitFullscreen().catch(function () {}); }
+              }
+              return;
+            }
+
+            if (!remoteEnabled) {
+              remoteEnabled = true;
+              playerWrap.classList.add('remote-controlled');
+              document.body.classList.add('remote-fullscreen');
+              // 這裡是輪詢回應後才觸發,不是使用者直接點擊觸發,不算瀏覽器要求的「使用者手勢」,
+              // 原生全螢幕 API 很可能會被擋下來——失敗就靠上面的 remote-fullscreen CSS 頂著,
+              // 不需要特別處理這個 rejection。
+              if (!document.fullscreenElement) { fullscreenWrap.requestFullscreen().catch(function () {}); }
+            }
+
+            if (state.VideoRelativePath && state.VideoRelativePath !== meta.relativePath) {
+              location.href = watchUrlForPath(state.VideoRelativePath);
+              return;
+            }
+
+            if (state.IsPlaying && video.paused) { video.play().catch(function () {}); }
+            else if (!state.IsPlaying && !video.paused) { video.pause(); }
+
+            var targetSec = state.PositionMs / 1000;
+            var cooldownActive = (Date.now() - lastResyncAt) < REMOTE_RESYNC_COOLDOWN_MS;
+            if (!cooldownActive && Math.abs(video.currentTime - targetSec) > REMOTE_DRIFT_THRESHOLD_SEC) {
+              video.currentTime = isFinite(video.duration) ? Math.min(targetSec, Math.max(0, video.duration)) : targetSec;
+              lastResyncAt = Date.now();
+            }
+
+            // 遠端控制中,音量/靜音/播放速度也一併跟主機同步(控制列被鎖住了,觀眾本來就
+            // 不能自己調),跟 play/pause 一樣直接套用,不用額外的漂移容忍。
+            if (video.playbackRate !== state.PlaybackRate) { video.playbackRate = state.PlaybackRate; }
+            if (video.muted !== state.Muted) { video.muted = state.Muted; }
+            if (Math.abs(video.volume - state.Volume) > 0.001) { video.volume = state.Volume; }
+          }
+
+          applyRemoteState($controlStateJson);
+          setInterval(function () {
+            fetch('/control/state').then(function (r) { return r.json(); }).then(applyRemoteState).catch(function () {});
+          }, REMOTE_POLL_MS);
         })();
         """.trimIndent()
 }

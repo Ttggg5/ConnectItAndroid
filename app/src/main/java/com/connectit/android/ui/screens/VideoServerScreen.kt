@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.SettingsRemote
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -40,13 +41,22 @@ import coil.compose.AsyncImage
 import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.model.VideoManifestResponse
+import com.connectit.android.net.fetchControlState
 import com.connectit.android.net.fetchVideoManifest
 import com.connectit.android.net.videoThumbnailUrl
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 private sealed interface ManifestState {
     data object Loading : ManifestState
     data object Failed : ManifestState
     data class Loaded(val response: VideoManifestResponse) : ManifestState
+
+    /** 遠端控制模式已開啟,但主機還沒選片(輪詢確認過,不是還沒查詢)。跟 [Loaded] 分開,而不是
+     * 用一個額外的 `remoteEnabled` 布林值疊加在 [Loaded] 上——這樣「主機是否已經選好片」的判斷
+     * 一定是查過 `/control/state` 之後才會決定要進哪個畫面,不會有主機其實已經選好片、卻先閃一下
+     * 「等待主機選片」畫面才跳走的情形(見 [VideoServerScreen] 裡怎麼組出這個狀態的說明)。 */
+    data class RemoteWaiting(val response: VideoManifestResponse) : ManifestState
 }
 
 /** 對應 Windows 端 VideoStreamingService.cs 的 SortOptions:(查詢字串值、下拉選單顯示文字)。 */
@@ -72,7 +82,7 @@ private fun List<VideoManifestEntry>.sortedByOption(option: VideoSortOption): Li
 fun VideoServerScreen(
     server: DiscoveredDevice,
     onBack: () -> Unit,
-    onPlay: (entries: List<VideoManifestEntry>, startIndex: Int) -> Unit,
+    onPlay: (entries: List<VideoManifestEntry>, startIndex: Int, remoteControlEnabled: Boolean) -> Unit,
 ) {
     var state by remember(server) { mutableStateOf<ManifestState>(ManifestState.Loading) }
     var sort by remember { mutableStateOf(VideoSortOption.NAME_ASC) }
@@ -80,9 +90,62 @@ fun VideoServerScreen(
 
     BackHandler(onBack = onBack)
 
+    // 遠端控制模式中不能讓觀眾自己瀏覽/挑影片(跟網站不該顯示首頁清單同一個道理)。這裡在拿到
+    // manifest 後,若偵測到遠端控制已開啟,會「在畫面真的畫出來之前」就先查一次目前的播放狀態
+    // ——如果主機在觀眾連上來之前就已經選好影片,這裡會直接跳進播放畫面,中間完全不會經過
+    // 「等待主機選片」那個畫面,不會讓使用者誤以為卡住。真的沒選片時才會停在 [ManifestState.RemoteWaiting]。
     LaunchedEffect(server) {
         val response = fetchVideoManifest(server.host, server.port)
-        state = if (response != null) ManifestState.Loaded(response) else ManifestState.Failed
+        if (response == null) {
+            state = ManifestState.Failed
+            return@LaunchedEffect
+        }
+
+        if (response.remoteControlEnabled) {
+            val controlState = fetchControlState(server.host, server.port)
+            val index = controlState
+                ?.takeIf { it.enabled }
+                ?.videoRelativePath
+                ?.let { path -> response.entries.indexOfFirst { it.relativePath == path } }
+                ?.takeIf { it >= 0 }
+            if (index != null) {
+                onPlay(response.entries, index, true)
+                return@LaunchedEffect
+            }
+            state = ManifestState.RemoteWaiting(response)
+        } else {
+            state = ManifestState.Loaded(response)
+        }
+    }
+
+    // 進畫面後持續輪詢,處理「稍後才發生」的狀態變化:主機在觀眾已經看著清單/等待畫面時才開啟
+    // 遠端控制、選片、或是把遠端控制關掉——都靠這個迴圈即時反映,不用使用者自己重新整理。
+    LaunchedEffect(server) {
+        while (isActive) {
+            delay(800)
+
+            val response = when (val current = state) {
+                is ManifestState.Loaded -> current.response
+                is ManifestState.RemoteWaiting -> current.response
+                ManifestState.Loading, ManifestState.Failed -> continue
+            }
+
+            val controlState = fetchControlState(server.host, server.port) ?: continue
+            if (controlState.enabled) {
+                val index = controlState.videoRelativePath
+                    ?.let { path -> response.entries.indexOfFirst { it.relativePath == path } }
+                    ?.takeIf { it >= 0 }
+                if (index != null) {
+                    onPlay(response.entries, index, true)
+                    return@LaunchedEffect
+                }
+                if (state !is ManifestState.RemoteWaiting) {
+                    state = ManifestState.RemoteWaiting(response)
+                }
+            } else if (state is ManifestState.RemoteWaiting) {
+                state = ManifestState.Loaded(response)
+            }
+        }
     }
 
     Scaffold(
@@ -122,6 +185,17 @@ fun VideoServerScreen(
             is ManifestState.Failed -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
                 Text("無法取得影片清單,請確認對方裝置仍在線上。")
             }
+            is ManifestState.RemoteWaiting -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Filled.SettingsRemote,
+                        contentDescription = null,
+                        modifier = Modifier.padding(bottom = 12.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    Text("遙控模式已開啟,等待主機選擇影片…")
+                }
+            }
             is ManifestState.Loaded -> {
                 val entries = current.response.entries.sortedByOption(sort)
                 // 用自動排列的格線,而不是固定單欄清單:折疊機攤開、平板橫向這種寬螢幕下會自動
@@ -136,7 +210,13 @@ fun VideoServerScreen(
                 ) {
                     items(entries, key = { it.relativePath }) { entry ->
                         val index = entries.indexOf(entry)
-                        Card(modifier = Modifier.fillMaxWidth(), onClick = { onPlay(entries, index) }) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            // 只有在 ManifestState.Loaded 分支才會畫出這個可自由瀏覽的格線,遠端控制
+                            // 模式一開啟就會轉去 RemoteWaiting/直接進播放畫面,不會停在這裡讓人選片,
+                            // 所以這裡點下去一定是「自由觀看」,不用再帶遠端控制旗標。
+                            onClick = { onPlay(entries, index, false) },
+                        ) {
                             Column {
                                 Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
                                     AsyncImage(

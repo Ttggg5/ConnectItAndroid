@@ -6,6 +6,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -14,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.SettingsRemote
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -37,7 +39,12 @@ import com.connectit.android.service.VideoHostUiState
 import com.connectit.android.ui.components.AdaptiveContentWidth
 
 @Composable
-fun VideoScreen(service: ConnectItService, modifier: Modifier = Modifier, onWatch: (DiscoveredDevice) -> Unit) {
+fun VideoScreen(
+    service: ConnectItService,
+    modifier: Modifier = Modifier,
+    onWatch: (DiscoveredDevice) -> Unit,
+    onOpenHostControl: () -> Unit,
+) {
     val context = LocalContext.current
     val servers by service.videoServers.collectAsState()
     val hostState by service.videoHostState.collectAsState()
@@ -63,6 +70,7 @@ fun VideoScreen(service: ConnectItService, modifier: Modifier = Modifier, onWatc
                         hostState = hostState,
                         onStartSharing = { pickShareFolder.launch(null) },
                         onStopSharing = { service.stopVideoServer() },
+                        onOpenHostControl = onOpenHostControl,
                     )
                 }
 
@@ -99,6 +107,7 @@ private fun VideoHostCard(
     hostState: VideoHostUiState,
     onStartSharing: () -> Unit,
     onStopSharing: () -> Unit,
+    onOpenHostControl: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -106,7 +115,13 @@ private fun VideoHostCard(
             when (hostState) {
                 is VideoHostUiState.Running -> {
                     Text("執行中:${hostState.folderName},共 ${hostState.videoCount} 部影片(連接埠 ${hostState.port})")
-                    OutlinedButton(onClick = onStopSharing) { Text("停止分享") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onStopSharing) { Text("停止分享") }
+                        Button(onClick = onOpenHostControl) {
+                            Icon(Icons.Filled.SettingsRemote, contentDescription = null)
+                            Text(" 遙控模式")
+                        }
+                    }
                 }
                 VideoHostUiState.Idle -> {
                     Text("選擇一個資料夾,讓其他裝置能在區網內搜尋、觀看裡面的影片。")

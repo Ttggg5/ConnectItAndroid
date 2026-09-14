@@ -33,14 +33,15 @@ private const val COPY_BUFFER_SIZE = 64 * 1024
  * 所以讀檔一律透過 [Context.getContentResolver]。純邏輯類別,不是 Android Service 本身,由
  * [com.connectit.android.service.ConnectItService] 持有一個實例並把狀態轉接到 UI。
  */
-class VideoHostServer(private val context: Context) {
+class VideoHostServer(private val context: Context, private val controlState: PlaybackControlState) {
 
     private data class ParsedRequest(val method: String, val path: String, val headers: Map<String, String>)
 
     private var serverSocket: ServerSocket? = null
     private var scope: CoroutineScope? = null
 
-    private var manifest: List<HostManifestEntry> = emptyList()
+    var manifest: List<HostManifestEntry> = emptyList()
+        private set
     private var manifestByRelativePath: Map<String, HostManifestEntry> = emptyMap()
     private var filesByRelativePath: Map<String, Uri> = emptyMap()
     private var serverName: String = ""
@@ -48,6 +49,10 @@ class VideoHostServer(private val context: Context) {
     // 縮圖產生相對昂貴,同一支影片整個伺服器存活期間只算一次,存的是 Deferred 而不是結果本身,
     // 這樣同時間好幾個請求剛好都在搶同一支還沒算完的縮圖時,大家會一起等同一個工作的結果。
     private val thumbnailCache = ConcurrentHashMap<String, Deferred<ByteArray?>>()
+
+    // 影片長度只有遙控面板畫時間軸時才需要,一樣用 Deferred 快取,同一支影片整個伺服器
+    // 存活期間只探測一次。
+    private val durationCache = ConcurrentHashMap<String, Deferred<Long?>>()
 
     var onStatusChanged: ((String) -> Unit)? = null
 
@@ -100,16 +105,30 @@ class VideoHostServer(private val context: Context) {
         runCatching { serverSocket?.close() }
         serverSocket = null
 
+        durationCache.clear()
         manifest = emptyList()
         manifestByRelativePath = emptyMap()
         filesByRelativePath = emptyMap()
         thumbnailCache.clear()
         port = 0
         manifestCount = 0
+        controlState.reset()
 
         if (wasRunning) {
             onStatusChanged?.invoke("影片伺服器已關閉。")
         }
+    }
+
+    /** 供遙控面板畫時間軸用——同一個 process 內直接呼叫,不像縮圖/媒體是走 HTTP 端點。
+     * 探測失敗(格式不支援/檔案有問題)回傳 null,呼叫端要自行處理「不知道總長度」的情況。 */
+    suspend fun getDurationMs(relativePath: String): Long? {
+        val key = relativePath.lowercase()
+        val uri = filesByRelativePath[key] ?: return null
+        val currentScope = scope ?: return null
+        val deferred = durationCache.computeIfAbsent(key) {
+            currentScope.async { VideoDurationProbe.tryGetDurationMs(context, uri) }
+        }
+        return deferred.await()
     }
 
     private suspend fun acceptLoop(server: ServerSocket) {
@@ -166,7 +185,22 @@ class VideoHostServer(private val context: Context) {
         // 要先拆開、解碼才能比對路由。
         val path = Uri.decode(request.path.substringBefore('?'))
 
+        // 遠端控制模式中,觀眾不該看得到可以自己瀏覽/挑影片的首頁清單——跟原生 App 端「鎖住
+        // VideoServerScreen,只能看主機正在播的那一部」是同一個道理。所以首頁、觀看頁都改成
+        // 完全以主機目前選的影片為準,忽略請求本身要求的是哪一部/哪個排序。
+        val controlSnapshot = controlState.snapshot()
+
         if (path == "/" || path == "/index.html") {
+            if (controlSnapshot.enabled) {
+                val activeRelativePath = controlSnapshot.videoRelativePath
+                if (activeRelativePath != null) {
+                    writeRedirect(output, "/watch?path=${Uri.encode(activeRelativePath)}")
+                } else {
+                    writeHtml(output, VideoHostPages.buildRemoteWaitingPageHtml(serverName))
+                }
+                return
+            }
+
             // 只有一部影片時不用另外顯示「只有一格」的清單頁,直接跳到觀看頁。
             if (manifest.size == 1) {
                 writeRedirect(output, "/watch?v=0")
@@ -179,19 +213,44 @@ class VideoHostServer(private val context: Context) {
         }
 
         if (path.equals("/watch", ignoreCase = true)) {
-            val index = parseVideoIndex(request.path)
+            if (controlSnapshot.enabled) {
+                val activeRelativePath = controlSnapshot.videoRelativePath
+                if (activeRelativePath == null) {
+                    writeHtml(output, VideoHostPages.buildRemoteWaitingPageHtml(serverName))
+                    return
+                }
+
+                // 忽略請求本身要求的是哪一部——不管網址列打的是哪個 v=/path=,遠端控制中一律
+                // 只顯示主機目前選的那一部,這樣觀眾沒有辦法透過改網址繞過鎖定。
+                val activeIndex = manifestByRelativePath[activeRelativePath.lowercase()]?.let { manifest.indexOf(it) }
+                if (activeIndex == null || activeIndex < 0) {
+                    writeStatusOnly(output, 404, "Not Found")
+                    return
+                }
+
+                val sort = parseSortOption(request.path)
+                writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, activeIndex, sort, controlSnapshot))
+                return
+            }
+
+            val index = resolveVideoIndex(request.path)
             if (index == null || index < 0 || index >= manifest.size) {
                 writeStatusOnly(output, 404, "Not Found")
                 return
             }
 
             val sort = parseSortOption(request.path)
-            writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, index, sort))
+            writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, index, sort, controlSnapshot))
             return
         }
 
         if (path.equals("/manifest", ignoreCase = true)) {
             writeManifest(output)
+            return
+        }
+
+        if (path.equals("/control/state", ignoreCase = true)) {
+            writeControlState(output)
             return
         }
 
@@ -225,6 +284,17 @@ class VideoHostServer(private val context: Context) {
 
     private fun parseVideoIndex(rawPathWithQuery: String): Int? =
         getQueryParam(rawPathWithQuery, "v")?.toIntOrNull()
+
+    /** 除了原本以 index 選片("?v=")外,也支援以相對路徑選片("?path=")——遠端控制切換影片時
+     * index 會因為排序方式不同而不穩定,相對路徑才是跨排序、跨裝置都穩定的識別方式。 */
+    private fun resolveVideoIndex(rawPathWithQuery: String): Int? {
+        val path = getQueryParam(rawPathWithQuery, "path")
+        if (path != null) {
+            val entry = manifestByRelativePath[path.lowercase()] ?: return null
+            return manifest.indexOf(entry).takeIf { it >= 0 }
+        }
+        return parseVideoIndex(rawPathWithQuery)
+    }
 
     private fun parseSortOption(rawPathWithQuery: String): VideoSort =
         VideoSort.fromValue(getQueryParam(rawPathWithQuery, "sort"))
@@ -266,8 +336,18 @@ class VideoHostServer(private val context: Context) {
                     .put("Modified", Instant.ofEpochMilli(entry.modifiedEpochMillis).toString()),
             )
         }
-        val payload = JSONObject().put("Name", serverName).put("Entries", entries).toString().toByteArray(Charsets.UTF_8)
+        val payload = JSONObject()
+            .put("Name", serverName)
+            .put("Entries", entries)
+            .put("RemoteControlEnabled", controlState.snapshot().enabled)
+            .toString().toByteArray(Charsets.UTF_8)
 
+        writeHeaders(output, 200, "OK", listOf("Content-Type" to "application/json", "Content-Length" to payload.size.toString()))
+        output.write(payload)
+    }
+
+    private fun writeControlState(output: OutputStream) {
+        val payload = controlState.snapshot().toJson().toString().toByteArray(Charsets.UTF_8)
         writeHeaders(output, 200, "OK", listOf("Content-Type" to "application/json", "Content-Length" to payload.size.toString()))
         output.write(payload)
     }

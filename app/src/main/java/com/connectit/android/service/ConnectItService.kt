@@ -37,6 +37,8 @@ import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.repo.SettingsRepository
 import com.connectit.android.util.DownloadStorage
 import com.connectit.android.util.SafUtils
+import com.connectit.android.video.HostManifestEntry
+import com.connectit.android.video.PlaybackControlState
 import com.connectit.android.video.VideoHostServer
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -91,6 +93,7 @@ class ConnectItService : LifecycleService() {
     private lateinit var deviceDiscovery: NsdDiscoveryManager
     private lateinit var videoDiscovery: NsdDiscoveryManager
     private lateinit var videoHostServer: VideoHostServer
+    private lateinit var playbackControlState: PlaybackControlState
 
     /** 目前生效的設定快照,由 [onCreate] 裡的收集器持續更新,供不是 Compose 環境的內部邏輯
      * (通知開關、信任裝置比對、下載資料夾)同步讀取,不用每次都掛一個新的 Flow 收集器。 */
@@ -110,6 +113,16 @@ class ConnectItService : LifecycleService() {
 
     private val _videoHostState = MutableStateFlow<VideoHostUiState>(VideoHostUiState.Idle)
     val videoHostState: StateFlow<VideoHostUiState> = _videoHostState.asStateFlow()
+
+    /** 遠端控制模式的即時播放狀態,供主機端遙控畫面(見 VideoHostControlScreen)顯示與驅動。
+     * 觀眾端不用這個 StateFlow——它們是另一台裝置,只能透過 `/control/state` 輪詢取得。 */
+    private val _playbackState = MutableStateFlow(
+        PlaybackControlState.Snapshot(
+            enabled = false, videoRelativePath = null, isPlaying = false, positionMs = 0,
+            playbackRate = 1.0, volume = 1.0, muted = false, version = 0, updatedAtUtcMs = 0,
+        ),
+    )
+    val playbackState: StateFlow<PlaybackControlState.Snapshot> = _playbackState.asStateFlow()
 
     private val _connectionState = MutableStateFlow<ConnectionUiState>(ConnectionUiState.Idle)
     val connectionState: StateFlow<ConnectionUiState> = _connectionState.asStateFlow()
@@ -162,7 +175,8 @@ class ConnectItService : LifecycleService() {
         val nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
         deviceDiscovery = NsdDiscoveryManager(nsdManager, NsdDiscoveryManager.DEVICE_SERVICE_TYPE)
         videoDiscovery = NsdDiscoveryManager(nsdManager, NsdDiscoveryManager.VIDEO_SERVICE_TYPE)
-        videoHostServer = VideoHostServer(applicationContext)
+        playbackControlState = PlaybackControlState()
+        videoHostServer = VideoHostServer(applicationContext, playbackControlState)
         connectionEngine = ConnectionEngine(applicationContext, lifecycleScope)
         connectionEngine.customDownloadFolderProvider = { cachedSettings.customDownloadFolderUri?.let(Uri::parse) }
 
@@ -283,6 +297,7 @@ class ConnectItService : LifecycleService() {
             } else {
                 _videoHostState.value = VideoHostUiState.Idle
             }
+            _playbackState.value = playbackControlState.snapshot()
         }
     }
 
@@ -290,6 +305,67 @@ class ConnectItService : LifecycleService() {
         videoDiscovery.stopAdvertising()
         videoHostServer.stop()
         _videoHostState.value = VideoHostUiState.Idle
+        _playbackState.value = playbackControlState.snapshot()
+    }
+
+    // ===================== 遠端控制模式(主機端遙控) =====================
+
+    /** 主機端目前分享出去的影片庫,供遙控畫面選片用(直接沿用啟動時掃描好的 manifest,不重新掃描)。 */
+    fun hostManifestEntries(): List<HostManifestEntry> = videoHostServer.manifest
+
+    /** 供遙控面板畫時間軸用,見 [VideoHostServer.getDurationMs]。 */
+    suspend fun hostVideoDurationMs(relativePath: String): Long? = videoHostServer.getDurationMs(relativePath)
+
+    /** 即時計算目前播放位置(同一份「碼表」外插邏輯,供遙控畫面用本機輪詢方式顯示走動中的進度條,
+     * 不用等下一次下指令才更新——這是同一個 process 內的呼叫,不用像觀眾端一樣打 HTTP)。 */
+    fun currentPlaybackSnapshot(): PlaybackControlState.Snapshot = playbackControlState.snapshot()
+
+    fun setRemoteControlEnabled(enabled: Boolean) {
+        playbackControlState.setEnabled(enabled)
+        _playbackState.value = playbackControlState.snapshot()
+    }
+
+    fun remoteControlPlayVideo(relativePath: String) {
+        playbackControlState.setVideo(relativePath)
+        _playbackState.value = playbackControlState.snapshot()
+    }
+
+    fun remoteControlSetPlaying(playing: Boolean) {
+        playbackControlState.setPlaying(playing)
+        _playbackState.value = playbackControlState.snapshot()
+    }
+
+    fun remoteControlSeek(positionMs: Long) {
+        playbackControlState.seek(positionMs)
+        _playbackState.value = playbackControlState.snapshot()
+    }
+
+    fun remoteControlSetPlaybackRate(rate: Double) {
+        playbackControlState.setPlaybackRate(rate)
+        _playbackState.value = playbackControlState.snapshot()
+    }
+
+    fun remoteControlSetVolume(volume: Double) {
+        playbackControlState.setVolume(volume)
+        _playbackState.value = playbackControlState.snapshot()
+    }
+
+    fun remoteControlSetMuted(muted: Boolean) {
+        playbackControlState.setMuted(muted)
+        _playbackState.value = playbackControlState.snapshot()
+    }
+
+    /** 依 [hostManifestEntries] 的順序切到上一部/下一部,供遙控畫面的上一部/下一部按鈕用——
+     * 跟一般觀看端的上一部/下一部是同一種「在清單裡移動一格」的概念,只是這裡直接用 manifest
+     * 原始順序(遙控面板沒有排序下拉選單),不像觀看端會依使用者選的排序方式決定順序。 */
+    fun remoteControlSkip(delta: Int) {
+        val entries = hostManifestEntries()
+        if (entries.isEmpty()) return
+        val currentPath = playbackControlState.snapshot().videoRelativePath
+        val currentIndex = entries.indexOfFirst { it.relativePath == currentPath }
+        val nextIndex = (if (currentIndex >= 0) currentIndex else 0) + delta
+        if (nextIndex !in entries.indices) return
+        remoteControlPlayVideo(entries[nextIndex].relativePath)
     }
 
     // ===================== 內部事件轉接 =====================
