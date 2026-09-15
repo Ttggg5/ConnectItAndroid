@@ -27,10 +27,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Check
@@ -146,6 +148,9 @@ fun VideoPlayerScreen(
     var isFullscreen by remember { mutableStateOf(false) }
     var countdownSeconds by remember { mutableStateOf<Int?>(null) }
     var countdownJob by remember { mutableStateOf<Job?>(null) }
+    // 觀看頁清單自己的顯示排序,只影響清單怎麼列出來,不影響上一部/下一部、自動播放下一部的順序
+    // ——那些仍照 entries 原本的順序走(進這個畫面之前,在 VideoServerScreen 選好、固定下來的順序)。
+    var sortOption by remember { mutableStateOf(VideoSortOption.NAME_ASC) }
 
     // 遠端控制模式:主機正在控制播放時鎖住手動控制列,改成跟隨輪詢到的狀態播放(見下方
     // fetchControlState 的輪詢迴圈)。remoteControlHint 只是掛載時的初始值,實際狀態一律以
@@ -409,13 +414,16 @@ fun VideoPlayerScreen(
         BoxWithConstraints(
             modifier = Modifier.fillMaxSize().padding(if (isFullscreen) PaddingValues(0.dp) else padding),
         ) {
-            // 折疊機攤開、平板橫向這種寬螢幕才顯示側邊清單(對應 Windows 觀看頁
-            // `main.watch{grid-template-columns:minmax(0,1fr) 360px}` 的側邊清單),
-            // 手機直向寬度不夠、或全螢幕播放時都只顯示播放器本身。
+            // 折疊機攤開、平板橫向這種寬螢幕才把清單放在側邊(對應 Windows 觀看頁
+            // `main.watch{grid-template-columns:minmax(0,1fr) 360px}` 的側邊清單)。
             val showSidebar = !isFullscreen && maxWidth >= AdaptiveNavigationBreakpoint && entries.size > 1
+            // 手機直向這種窄螢幕擠不下側邊欄,但清單不能因此整個消失不見——對應 Windows 觀看頁窄視窗時
+            // `@media(max-width:860px){main.watch{grid-template-columns:minmax(0,1fr)}}` 讓清單從
+            // 側邊改成疊到播放器下面、繼續往下捲動就看得到的做法。全螢幕時仍然不顯示,理由跟側邊欄一樣。
+            val showStackedList = !isFullscreen && !showSidebar && entries.size > 1
 
             val playerContent: @Composable () -> Unit = {
-                Column(modifier = Modifier.fillMaxSize()) {
+                Column(modifier = if (isFullscreen) Modifier.fillMaxSize() else Modifier.fillMaxWidth()) {
                     Box(
                         modifier = if (isFullscreen) {
                             Modifier.fillMaxSize()
@@ -528,19 +536,38 @@ fun VideoPlayerScreen(
                 }
             }
 
-            if (showSidebar) {
-                Row(Modifier.fillMaxSize()) {
-                    Box(Modifier.weight(1f).fillMaxHeight()) { playerContent() }
-                    VideoSidebar(
-                        entries = entries,
-                        currentIndex = currentIndex,
-                        server = server,
-                        onSelect = { index -> playIndex(index) },
-                        modifier = Modifier.width(320.dp).fillMaxHeight(),
-                    )
+            when {
+                showSidebar -> {
+                    Row(Modifier.fillMaxSize()) {
+                        Box(Modifier.weight(1f).fillMaxHeight()) { playerContent() }
+                        VideoSidebar(
+                            entries = entries,
+                            currentIndex = currentIndex,
+                            server = server,
+                            sortOption = sortOption,
+                            onSortOptionChange = { sortOption = it },
+                            onSelect = { index -> playIndex(index) },
+                            modifier = Modifier.width(320.dp).fillMaxHeight(),
+                        )
+                    }
                 }
-            } else {
-                playerContent()
+                showStackedList -> {
+                    // 播放器/標題只是清單最上面那一項,跟其他影片列一起放進同一個 LazyColumn,
+                    // 才能整頁一起往下捲動(而不是把會自撐高度的 LazyColumn 塞進另一個可捲動容器裡)。
+                    LazyColumn(Modifier.fillMaxSize()) {
+                        item { playerContent() }
+                        videoPlaylistItems(
+                            entries = entries,
+                            currentIndex = currentIndex,
+                            server = server,
+                            sortOption = sortOption,
+                            onSortOptionChange = { sortOption = it },
+                            onSelect = { index -> playIndex(index) },
+                            rowModifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+                else -> playerContent()
             }
         }
     }
@@ -687,6 +714,8 @@ private fun VideoSidebar(
     entries: List<VideoManifestEntry>,
     currentIndex: Int,
     server: DiscoveredDevice,
+    sortOption: VideoSortOption,
+    onSortOptionChange: (VideoSortOption) -> Unit,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -695,36 +724,116 @@ private fun VideoSidebar(
         contentPadding = PaddingValues(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        itemsIndexed(entries, key = { _, entry -> entry.relativePath }) { index, entry ->
-            val isCurrent = index == currentIndex
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(if (isCurrent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)
-                    .clickable(enabled = !isCurrent) { onSelect(index) }
-                    .padding(6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Box(modifier = Modifier.width(110.dp).aspectRatio(16f / 9f)) {
-                    AsyncImage(
-                        model = videoThumbnailUrl(server.host, server.port, entry.relativePath),
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(6.dp)),
-                        contentScale = ContentScale.Crop,
-                    )
-                }
-                Column {
-                    Text(entry.name, style = MaterialTheme.typography.bodyMedium, maxLines = 2)
-                    Text(formatBytes(entry.size), style = MaterialTheme.typography.bodySmall)
-                    if (isCurrent) {
-                        Text(
-                            "正在播放",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                }
+        videoPlaylistItems(
+            entries = entries,
+            currentIndex = currentIndex,
+            server = server,
+            sortOption = sortOption,
+            onSortOptionChange = onSortOptionChange,
+            onSelect = onSelect,
+        )
+    }
+}
+
+/** 側邊清單、手機直向堆疊清單共用的內容:排序選單 + 依排序後順序列出的影片列——用
+ * [LazyListScope] 的擴充函式而不是包一層自己的 Composable,是因為兩邊各自是不同的 LazyColumn
+ * (側邊欄自己一個、堆疊清單是跟播放器同一個),沒辦法共用同一個 LazyColumn 實例。
+ *
+ * `entry.relativePath` 拿來當排序後找回原始索引的鍵——[onSelect]、`isCurrent` 都要對照
+ * [entries] 原本(未排序)的索引,因為上一部/下一部、自動播放下一部全部照 [entries] 原本順序走,
+ * 不會因為這個清單改了顯示排序就跟著變。 */
+private fun LazyListScope.videoPlaylistItems(
+    entries: List<VideoManifestEntry>,
+    currentIndex: Int,
+    server: DiscoveredDevice,
+    sortOption: VideoSortOption,
+    onSortOptionChange: (VideoSortOption) -> Unit,
+    onSelect: (Int) -> Unit,
+    rowModifier: Modifier = Modifier,
+) {
+    item {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            SortMenuButton(current = sortOption, onSelect = onSortOptionChange)
+        }
+    }
+
+    val indexByPath = entries.withIndex().associate { (index, entry) -> entry.relativePath to index }
+    val sortedEntries = entries.sortedByOption(sortOption)
+    items(sortedEntries, key = { it.relativePath }) { entry ->
+        val index = indexByPath.getValue(entry.relativePath)
+        VideoListRow(
+            entry = entry,
+            isCurrent = index == currentIndex,
+            server = server,
+            onClick = { onSelect(index) },
+            modifier = rowModifier,
+        )
+    }
+}
+
+@Composable
+private fun SortMenuButton(current: VideoSortOption, onSelect: (VideoSortOption) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "排序方式")
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            VideoSortOption.entries.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option.label) },
+                    onClick = {
+                        onSelect(option)
+                        expanded = false
+                    },
+                    leadingIcon = if (option == current) {
+                        { Icon(Icons.Filled.Check, contentDescription = null) }
+                    } else {
+                        null
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun VideoListRow(
+    entry: VideoManifestEntry,
+    isCurrent: Boolean,
+    server: DiscoveredDevice,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (isCurrent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)
+            .clickable(enabled = !isCurrent, onClick = onClick)
+            .padding(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(modifier = Modifier.width(110.dp).aspectRatio(16f / 9f)) {
+            AsyncImage(
+                model = videoThumbnailUrl(server.host, server.port, entry.relativePath),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(6.dp)),
+                contentScale = ContentScale.Crop,
+            )
+        }
+        Column {
+            Text(entry.name, style = MaterialTheme.typography.bodyMedium, maxLines = 2)
+            Text(formatBytes(entry.size), style = MaterialTheme.typography.bodySmall)
+            if (isCurrent) {
+                Text(
+                    "正在播放",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
             }
         }
     }

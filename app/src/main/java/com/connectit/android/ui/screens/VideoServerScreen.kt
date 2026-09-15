@@ -59,8 +59,9 @@ private sealed interface ManifestState {
     data class RemoteWaiting(val response: VideoManifestResponse) : ManifestState
 }
 
-/** 對應 Windows 端 VideoStreamingService.cs 的 SortOptions:(查詢字串值、下拉選單顯示文字)。 */
-private enum class VideoSortOption(val label: String) {
+/** 對應 Windows 端 VideoStreamingService.cs 的 SortOptions:(查詢字串值、下拉選單顯示文字)。
+ * 沒標 `private`,因為觀看頁(VideoPlayerScreen)的側邊/堆疊清單也共用同一套排序選項。 */
+enum class VideoSortOption(val label: String) {
     NAME_ASC("檔名(A→Z)"),
     NAME_DESC("檔名(Z→A)"),
     SIZE_ASC("檔案大小(小→大)"),
@@ -69,7 +70,7 @@ private enum class VideoSortOption(val label: String) {
     DATE_ASC("修改時間(舊→新)"),
 }
 
-private fun List<VideoManifestEntry>.sortedByOption(option: VideoSortOption): List<VideoManifestEntry> = when (option) {
+fun List<VideoManifestEntry>.sortedByOption(option: VideoSortOption): List<VideoManifestEntry> = when (option) {
     VideoSortOption.NAME_ASC -> sortedBy { it.name.lowercase() }
     VideoSortOption.NAME_DESC -> sortedByDescending { it.name.lowercase() }
     VideoSortOption.SIZE_ASC -> sortedBy { it.size }
