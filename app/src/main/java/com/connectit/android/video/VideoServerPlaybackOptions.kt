@@ -8,6 +8,7 @@ package com.connectit.android.video
 data class VideoServerPlaybackOptions(
     val defaultSort: String = VideoSort.DEFAULT_VALUE,
     val autoplayNext: Boolean = DEFAULT_AUTOPLAY_NEXT,
+    val shuffle: Boolean = DEFAULT_SHUFFLE,
     val defaultVolumePercent: Int = DEFAULT_VOLUME_PERCENT,
     val defaultSpeed: Double = DEFAULT_PLAYBACK_SPEED,
     val autoplayCountdownSeconds: Int = DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS,
@@ -15,6 +16,7 @@ data class VideoServerPlaybackOptions(
 ) {
     companion object {
         const val DEFAULT_AUTOPLAY_NEXT = true
+        const val DEFAULT_SHUFFLE = false
         const val DEFAULT_VOLUME_PERCENT = 100
         const val DEFAULT_PLAYBACK_SPEED = 1.0
         const val DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS = 5

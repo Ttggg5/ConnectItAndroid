@@ -39,6 +39,7 @@ data class AppSettings(
      * (清單排序方式、播放器初始行為、掃描資料夾時額外要當作影片的副檔名),不會在伺服器執行中即時生效。 */
     val videoDefaultSort: String = VideoSort.DEFAULT_VALUE,
     val videoAutoplayNext: Boolean = VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_NEXT,
+    val videoShuffle: Boolean = VideoServerPlaybackOptions.DEFAULT_SHUFFLE,
     val videoAutoplayCountdownSeconds: Int = VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS,
     val videoDefaultVolumePercent: Int = VideoServerPlaybackOptions.DEFAULT_VOLUME_PERCENT,
     val videoDefaultSpeed: Double = VideoServerPlaybackOptions.DEFAULT_PLAYBACK_SPEED,
@@ -73,6 +74,7 @@ class SettingsRepository(private val context: Context) {
         val VIDEO_SHARE_FOLDER_URI = stringPreferencesKey("video_share_folder_uri")
         val VIDEO_DEFAULT_SORT = stringPreferencesKey("video_default_sort")
         val VIDEO_AUTOPLAY_NEXT = booleanPreferencesKey("video_autoplay_next")
+        val VIDEO_SHUFFLE = booleanPreferencesKey("video_shuffle")
         val VIDEO_AUTOPLAY_COUNTDOWN_SECONDS = intPreferencesKey("video_autoplay_countdown_seconds")
         val VIDEO_DEFAULT_VOLUME_PERCENT = intPreferencesKey("video_default_volume_percent")
         val VIDEO_DEFAULT_SPEED = doublePreferencesKey("video_default_speed")
@@ -93,6 +95,7 @@ class SettingsRepository(private val context: Context) {
             videoDefaultSort = prefs[Keys.VIDEO_DEFAULT_SORT]?.takeIf { sort -> VideoSort.entries.any { it.value == sort } }
                 ?: VideoSort.DEFAULT_VALUE,
             videoAutoplayNext = prefs[Keys.VIDEO_AUTOPLAY_NEXT] ?: VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_NEXT,
+            videoShuffle = prefs[Keys.VIDEO_SHUFFLE] ?: VideoServerPlaybackOptions.DEFAULT_SHUFFLE,
             videoAutoplayCountdownSeconds = (prefs[Keys.VIDEO_AUTOPLAY_COUNTDOWN_SECONDS]
                 ?: VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS)
                 .coerceIn(VideoServerPlaybackOptions.MIN_AUTOPLAY_COUNTDOWN_SECONDS, VideoServerPlaybackOptions.MAX_AUTOPLAY_COUNTDOWN_SECONDS),
@@ -156,6 +159,10 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setVideoAutoplayNext(enabled: Boolean) {
         context.dataStore.edit { it[Keys.VIDEO_AUTOPLAY_NEXT] = enabled }
+    }
+
+    suspend fun setVideoShuffle(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.VIDEO_SHUFFLE] = enabled }
     }
 
     suspend fun setVideoAutoplayCountdownSeconds(seconds: Int) {

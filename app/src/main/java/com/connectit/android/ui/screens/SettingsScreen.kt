@@ -261,6 +261,18 @@ fun SettingsScreen(service: ConnectItService, modifier: Modifier = Modifier) {
                 )
             }
 
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Text("預設隨機播放")
+                Switch(
+                    checked = settings.videoShuffle,
+                    onCheckedChange = { scope.launch { service.settingsRepository.setVideoShuffle(it) } },
+                )
+            }
+
             OutlinedTextField(
                 value = autoplayCountdownText,
                 onValueChange = { text -> if (text.all { it.isDigit() } && text.length <= 2) autoplayCountdownText = text },

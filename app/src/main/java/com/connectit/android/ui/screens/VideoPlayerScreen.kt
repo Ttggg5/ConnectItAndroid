@@ -142,6 +142,10 @@ fun VideoPlayerScreen(
     var seekPreviewFraction by remember { mutableStateOf(0f) }
 
     var autoplayNext by remember { mutableStateOf(true) }
+    var shuffle by remember { mutableStateOf(false) }
+    // 每次打開隨機播放就遞增一次,當作 playOrder 的 remember key 之一——單靠 shuffle 這個布林值
+    // 沒辦法讓「關掉再打開」重新洗一次牌(同一個 true 值不會觸發 remember 重算)。
+    var shuffleSeed by remember { mutableStateOf(0) }
     var volume by remember { mutableStateOf(1f) }
     var mutedVolume by remember { mutableStateOf<Float?>(null) }
     var speed by remember { mutableStateOf(1f) }
@@ -265,14 +269,25 @@ fun VideoPlayerScreen(
         }
     }
 
-    // 初始套用上次記住的音量/速度/自動播放設定,並播放使用者點的那一部。
+    // 初始套用上次記住的音量/速度/自動播放/隨機播放設定,並播放使用者點的那一部。
     LaunchedEffect(Unit) {
         volume = prefs.volume.first()
         speed = prefs.speed.first()
         autoplayNext = prefs.autoplayNext.first()
+        shuffle = prefs.shuffle.first()
         exoPlayer.volume = volume
         exoPlayer.setPlaybackSpeed(speed)
         playIndex(startIndex)
+    }
+
+    // 隨機播放開啟時,上一部/下一部/播完自動播放下一部改走洗牌過的順序;關閉時仍照 entries
+    // 原本順序走(跟這個畫面本來的行為一致)。playOrder 存的是 entries 的索引,不是 entries 本身。
+    // 用 mutableStateOf(而不是單純的 val remember)是因為下面 onPlaybackStateChanged 的監聽器
+    // 只在 exoPlayer 建立時註冊一次,之後要讀到「當下」的 playOrder(而不是註冊當下那份舊值),
+    // 就得靠 State 讀取,跟 currentIndex/autoplayNext 已經在用的做法一致。
+    var playOrder by remember { mutableStateOf(entries.indices.toList()) }
+    LaunchedEffect(shuffle, shuffleSeed, entries) {
+        playOrder = if (shuffle) entries.indices.shuffled() else entries.indices.toList()
     }
 
     DisposableEffect(exoPlayer) {
@@ -285,8 +300,9 @@ fun VideoPlayerScreen(
                 if (state == Player.STATE_ENDED) {
                     val finished = entries.getOrNull(currentIndex) ?: return
                     scope.launch { prefs.clearPosition(videoKey(finished)) }
-                    val nextIndex = currentIndex + 1
-                    if (autoplayNext && nextIndex < entries.size) {
+                    val position = playOrder.indexOf(currentIndex)
+                    val nextIndex = playOrder.getOrNull(position + 1)
+                    if (autoplayNext && nextIndex != null) {
                         startAutoplayCountdown(nextIndex)
                     }
                 }
@@ -396,6 +412,7 @@ fun VideoPlayerScreen(
     }
 
     val currentEntry = entries.getOrNull(currentIndex)
+    val orderPosition = playOrder.indexOf(currentIndex)
 
     Scaffold(
         topBar = {
@@ -487,10 +504,10 @@ fun VideoPlayerScreen(
                                     exoPlayer.seekTo((seekPreviewFraction * durationMs).toLong())
                                     isSeeking = false
                                 },
-                                hasPrevious = currentIndex > 0,
-                                hasNext = currentIndex < entries.size - 1,
-                                onPrevious = { showControls(); playIndex(currentIndex - 1) },
-                                onNext = { showControls(); playIndex(currentIndex + 1) },
+                                hasPrevious = orderPosition > 0,
+                                hasNext = orderPosition in 0 until playOrder.lastIndex,
+                                onPrevious = { showControls(); playIndex(playOrder[orderPosition - 1]) },
+                                onNext = { showControls(); playIndex(playOrder[orderPosition + 1]) },
                                 onRewind = {
                                     showControls()
                                     exoPlayer.seekTo((exoPlayer.currentPosition - SkipDurationMs).coerceAtLeast(0L))
@@ -507,6 +524,13 @@ fun VideoPlayerScreen(
                                     autoplayNext = checked
                                     scope.launch { prefs.setAutoplayNext(checked) }
                                     if (!checked) cancelCountdown()
+                                },
+                                shuffle = shuffle,
+                                onShuffleChange = { checked ->
+                                    showControls()
+                                    shuffle = checked
+                                    if (checked) shuffleSeed++
+                                    scope.launch { prefs.setShuffle(checked) }
                                 },
                                 speed = speed,
                                 onSpeedChange = { option ->
@@ -591,6 +615,8 @@ private fun VideoControls(
     onPlayPause: () -> Unit,
     autoplayNext: Boolean,
     onAutoplayNextChange: (Boolean) -> Unit,
+    shuffle: Boolean,
+    onShuffleChange: (Boolean) -> Unit,
     speed: Float,
     onSpeedChange: (Float) -> Unit,
     volume: Float,
@@ -677,6 +703,18 @@ private fun VideoControls(
                         ) {
                             Text("自動播放下一部")
                             Checkbox(checked = autoplayNext, onCheckedChange = onAutoplayNextChange)
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onShuffleChange(!shuffle) }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text("隨機播放")
+                            Checkbox(checked = shuffle, onCheckedChange = onShuffleChange)
                         }
 
                         Text(
