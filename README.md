@@ -66,6 +66,10 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
 - **接收檔案儲存位置**:預設仍是公用的 `Download/ConnectIt` 資料夾,可以改用 SAF
   (Storage Access Framework)選任意資料夾(見 `util/DownloadStorage.kt` 的 `createViaSafTree`)。
 - **連線設定**:監聽連接埠(留空 = 系統自動指派;變更需要重啟 App 才會生效)與主動連線的逾時秒數。
+- **影片伺服器**:對應 Windows 端 `VideoServerSettingsService`——下次按「選擇資料夾開始分享」時
+  套用的預設值:清單排序方式、自動播放下一部(含倒數秒數)、預設音量/速度,以及掃描資料夾時
+  額外要當作影片的副檔名(內建清單以外)。只影響下一次開始分享套用的初始值,不會在伺服器執行
+  中即時生效,跟 `PlaybackControlState` 的遠端遙控是兩回事。
 
 ## 建置與執行
 

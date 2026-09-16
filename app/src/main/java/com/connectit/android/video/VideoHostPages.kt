@@ -49,6 +49,7 @@ object VideoHostPages {
         const val FULLSCREEN_EXIT = "M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"
         const val ARROW_BACK = "M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"
         const val PLAY_CIRCLE = "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"
+        const val FOLDER = "M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"
         const val SETTINGS = "M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"
     }
 
@@ -153,6 +154,14 @@ object VideoHostPages {
 
         .waiting-page{display:flex;align-items:center;justify-content:center;height:100vh;text-align:center;padding:24px;}
         .waiting-page p{font-size:16px;color:#ccc;}
+
+        .flatten-toggle{color:#ccc;text-decoration:none;font-size:12px;white-space:nowrap;border:1px solid #3a3a3a;border-radius:6px;padding:6px 10px;}
+        .flatten-toggle:hover{background:#2a2a2a;}
+        .breadcrumb{font-size:13px;color:#aaa;display:flex;gap:6px;flex-wrap:wrap;padding:12px 20px 0;}
+        .breadcrumb a{color:#ccc;text-decoration:none;}
+        .breadcrumb a:hover{text-decoration:underline;}
+        .folder-thumb{color:#f5c451;display:flex;align-items:center;justify-content:center;}
+        .empty-folder{padding:40px 20px;color:#888;text-align:center;}
         """.trimIndent()
 
     /** 遠端控制模式已開啟、但主機還沒選任何影片時顯示——不能讓觀眾自己從首頁清單挑,只能等主機
@@ -180,14 +189,14 @@ object VideoHostPages {
             """.trimIndent()
     }
 
-    private fun buildSortSelectHtml(selected: String, onChangeUrlPrefix: String): String {
+    private fun buildSortSelectHtml(selected: String, onChangeUrlPrefix: String, onChangeUrlSuffix: String = ""): String {
         val options = VideoSort.entries.joinToString("\n") { option ->
             val selectedAttr = if (option.value == selected) " selected" else ""
             """<option value="${option.value}"$selectedAttr>${option.label}</option>"""
         }
         return """
             <label class="sort-label">排序方式
-              <select onchange="location.href='$onChangeUrlPrefix'+this.value">
+              <select onchange="location.href='$onChangeUrlPrefix'+this.value+'$onChangeUrlSuffix'">
                 $options
               </select>
             </label>
@@ -236,11 +245,74 @@ object VideoHostPages {
         return if (unitIndex == 0) "${value.toInt()} ${units[unitIndex]}" else "%.1f %s".format(value, units[unitIndex])
     }
 
-    fun buildHomePageHtml(manifest: List<HostManifestEntry>, serverName: String, sort: VideoSort): String {
-        val cards = displayOrder(manifest, sort).joinToString("\n") { index ->
+    /** folder/flat 兩個查詢參數共同決定首頁怎麼列影片:預設(flat=false)照實際資料夾結構逐層瀏覽,
+     * folder 是目前瀏覽到的相對路徑(空字串代表根目錄);flat=true 則無視資料夾,把整個 manifest
+     * 攤平成單一清單(等同這個功能加入前的行為),供使用者在網頁上自行切換。 */
+    fun buildHomePageHtml(manifest: List<HostManifestEntry>, serverName: String, sort: VideoSort, folder: String, flat: Boolean): String {
+        val extraQuery = buildExtraQuery(folder, flat)
+        val cardsHtml: String
+
+        if (flat) {
+            cardsHtml = buildVideoCardsHtml(manifest, displayOrder(manifest, sort), sort, extraQuery)
+        } else {
+            val (subfolders, videoIndices) = getFolderContents(manifest, folder)
+            val videoIndexSet = videoIndices.toHashSet()
+            val orderedVideoIndices = displayOrder(manifest, sort).filter { videoIndexSet.contains(it) }
+
+            val folderCards = subfolders.joinToString("\n") { name ->
+                val childPath = if (folder.isEmpty()) name else "$folder/$name"
+                val count = countVideosUnder(manifest, childPath)
+                """
+                <a class="card folder-card" href="/?folder=${Uri.encode(childPath)}&sort=${sort.value}">
+                  <div class="thumb folder-thumb">${svg(Icons.FOLDER, 40)}</div>
+                  <div class="title">${htmlEncode(name)}</div>
+                  <div class="meta">$count 部影片</div>
+                </a>
+                """.trimIndent()
+            }
+
+            cardsHtml = if (subfolders.isEmpty() && videoIndices.isEmpty()) {
+                """<p class="empty-folder">這個資料夾是空的。</p>"""
+            } else {
+                folderCards + "\n" + buildVideoCardsHtml(manifest, orderedVideoIndices, sort, extraQuery)
+            }
+        }
+
+        val title = htmlEncode(serverName)
+        val breadcrumb = if (flat) "" else buildBreadcrumbHtml(folder, sort)
+        val flattenToggle = if (flat) {
+            """<a class="flatten-toggle" href="/?sort=${sort.value}">依資料夾顯示</a>"""
+        } else {
+            """<a class="flatten-toggle" href="/?flat=1&sort=${sort.value}">顯示成單一清單</a>"""
+        }
+
+        return """
+            <!doctype html>
+            <html lang="zh-Hant">
+            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>$title</title>
+            <style>$SHARED_CSS</style></head>
+            <body>
+              <header>
+                <h1>$title</h1>
+                ${buildSortSelectHtml(sort.value, buildHomeSortPrefix(folder, flat))}
+                $flattenToggle
+              </header>
+              $breadcrumb
+              <main class="grid">
+                $cardsHtml
+              </main>
+              <script>$BACK_TO_HOME_TRAP_SCRIPT</script>
+            </body>
+            </html>
+            """.trimIndent()
+    }
+
+    private fun buildVideoCardsHtml(manifest: List<HostManifestEntry>, indices: List<Int>, sort: VideoSort, extraQuery: String): String =
+        indices.joinToString("\n") { index ->
             val entry = manifest[index]
             """
-            <a class="card" href="/watch?v=$index&sort=${sort.value}">
+            <a class="card" href="/watch?v=$index&sort=${sort.value}$extraQuery">
               <div class="thumb">
                 <div class="thumb-fallback">${svg(Icons.PLAY_CIRCLE, 40)}</div>
                 <img src="/thumbnail/${escapeRelativePathForUrl(entry.relativePath)}" alt="" loading="lazy" onerror="this.style.display='none'">
@@ -251,25 +323,85 @@ object VideoHostPages {
             """.trimIndent()
         }
 
-        val title = htmlEncode(serverName)
-        return """
-            <!doctype html>
-            <html lang="zh-Hant">
-            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>$title</title>
-            <style>$SHARED_CSS</style></head>
-            <body>
-              <header>
-                <h1>$title</h1>
-                ${buildSortSelectHtml(sort.value, "/?sort=")}
-              </header>
-              <main class="grid">
-                $cards
-              </main>
-              <script>$BACK_TO_HOME_TRAP_SCRIPT</script>
-            </body>
-            </html>
-            """.trimIndent()
+    /** 依相對路徑字首比對 manifest,回傳 [folder] 底下「直屬」的子資料夾名稱(不含更深層的孫層)
+     * 以及直接放在這一層的影片索引——首頁逐層瀏覽的核心邏輯。只跟 manifest 的字串比對,不會真的
+     * 去讀檔案系統,folder 也不需要額外做路徑穿越檢查。 */
+    private fun getFolderContents(manifest: List<HostManifestEntry>, folder: String): Pair<List<String>, List<Int>> {
+        val prefix = if (folder.isEmpty()) "" else "$folder/"
+        val subfolders = mutableListOf<String>()
+        val videoIndices = mutableListOf<Int>()
+
+        for (i in manifest.indices) {
+            val relativePath = manifest[i].relativePath
+            if (prefix.isNotEmpty() && !relativePath.startsWith(prefix, ignoreCase = true)) {
+                continue
+            }
+
+            val remainder = relativePath.substring(prefix.length)
+            val slashIndex = remainder.indexOf('/')
+            if (slashIndex < 0) {
+                videoIndices.add(i)
+            } else {
+                val name = remainder.substring(0, slashIndex)
+                if (subfolders.none { it.equals(name, ignoreCase = true) }) {
+                    subfolders.add(name)
+                }
+            }
+        }
+
+        subfolders.sortWith(String.CASE_INSENSITIVE_ORDER)
+        return subfolders to videoIndices
+    }
+
+    private fun countVideosUnder(manifest: List<HostManifestEntry>, folderPath: String): Int {
+        val prefix = "$folderPath/"
+        return manifest.count { it.relativePath.startsWith(prefix, ignoreCase = true) }
+    }
+
+    fun normalizeFolder(folder: String?): String = folder?.trim('/') ?: ""
+
+    /** 接在 "&sort={sort}" 後面的額外查詢字串——flat=true 帶 "&flat=1",folder 模式底下非根目錄
+     * 則帶 "&folder=...",讓 watch 頁的返回/上一部/下一部/側欄連結都能保留目前瀏覽的情境。 */
+    private fun buildExtraQuery(folder: String, flat: Boolean): String =
+        if (flat) "&flat=1" else if (folder.isEmpty()) "" else "&folder=${Uri.encode(folder)}"
+
+    private fun buildHomeSortPrefix(folder: String, flat: Boolean): String {
+        if (flat) return "/?flat=1&sort="
+        return if (folder.isEmpty()) "/?sort=" else "/?folder=${Uri.encode(folder)}&sort="
+    }
+
+    private fun buildHomeHref(sort: VideoSort, folder: String, flat: Boolean): String = buildHomeSortPrefix(folder, flat) + sort.value
+
+    private fun buildBreadcrumbHtml(folder: String, sort: VideoSort): String {
+        if (folder.isEmpty()) return ""
+
+        val segments = folder.split('/')
+        val parts = mutableListOf("""<a href="/?sort=${sort.value}">首頁</a>""")
+        var accumulated = ""
+        for ((i, segment) in segments.withIndex()) {
+            accumulated = if (accumulated.isEmpty()) segment else "$accumulated/$segment"
+            parts.add(
+                if (i == segments.lastIndex) {
+                    htmlEncode(segment)
+                } else {
+                    """<a href="/?folder=${Uri.encode(accumulated)}&sort=${sort.value}">${htmlEncode(segment)}</a>"""
+                },
+            )
+        }
+
+        return """<nav class="breadcrumb">${parts.joinToString(" / ")}</nav>"""
+    }
+
+    private val SpeedOptions = listOf(0.5 to "0.5x", 1.0 to "1x", 1.25 to "1.25x", 1.5 to "1.5x", 2.0 to "2x")
+
+    /** "0.5"/"1"/"1.25" 這種格式跟前端 JS 用同一個字串當 &lt;option value&gt; 比對,不能用會
+     * 印出多餘 ".0" 的預設 Double.toString()。 */
+    private fun formatSpeedValue(value: Double): String =
+        if (value == value.toLong().toDouble()) value.toLong().toString() else value.toString()
+
+    private fun buildSpeedOptionsHtml(selected: Double): String = SpeedOptions.joinToString("\n") { (value, label) ->
+        val selectedAttr = if (kotlin.math.abs(value - selected) < 0.0001) " selected" else ""
+        """<option value="${formatSpeedValue(value)}"$selectedAttr>$label</option>"""
     }
 
     fun buildWatchPageHtml(
@@ -278,20 +410,33 @@ object VideoHostPages {
         index: Int,
         sort: VideoSort,
         controlSnapshot: PlaybackControlState.Snapshot,
+        options: VideoServerPlaybackOptions = VideoServerPlaybackOptions(),
+        folder: String = "",
+        flat: Boolean = false,
     ): String {
         val entry = manifest[index]
-        val order = displayOrder(manifest, sort)
+
+        // 觀看頁的上一部/下一部、右側清單預設只在「目前這個資料夾」裡走(跟首頁逐層瀏覽一致),
+        // 只有攤平模式才會照全域排序橫跨所有資料夾——不然使用者會在不知情的狀況下被帶去別的
+        // 資料夾。folder 模式下用的還是全域排序,只是先篩選成這個資料夾直屬的影片而已。
+        val order = if (flat) {
+            displayOrder(manifest, sort)
+        } else {
+            val folderVideoIndices = getFolderContents(manifest, folder).second.toHashSet()
+            displayOrder(manifest, sort).filter { folderVideoIndices.contains(it) }
+        }
         val position = order.indexOf(index)
         val hasPrev = position > 0
         val hasNext = position in 0 until order.size - 1
         val prevIndex = if (hasPrev) order[position - 1] else null
         val nextIndex = if (hasNext) order[position + 1] else null
+        val extraQuery = buildExtraQuery(folder, flat)
 
-        val sidebar = if (manifest.size > 1) {
+        val sidebar = if (order.size > 1) {
             """
             <aside class="sidebar">
-              ${buildSortSelectHtml(sort.value, "/watch?v=$index&sort=")}
-              ${buildSidebarItems(manifest, order, index, sort)}
+              ${buildSortSelectHtml(sort.value, "/watch?v=$index&sort=", extraQuery)}
+              ${buildSidebarItems(manifest, order, index, sort, extraQuery)}
             </aside>
             """.trimIndent()
         } else {
@@ -299,14 +444,19 @@ object VideoHostPages {
         }
         val title = htmlEncode(entry.name)
         val backLabel = htmlEncode(serverName)
+        val homeHref = buildHomeHref(sort, folder, flat)
 
         // 傳給前端 JS 用的中繼資料,以 JSON 安全編碼字串內容,並把 "</" 斷開避免檔名剛好含有
         // "</script>" 這種字串時提早把 <script> 區塊截斷。
         val relativePathJson = org.json.JSONObject.quote(entry.relativePath).replace("</", "<\\/")
         val sortJson = org.json.JSONObject.quote(sort.value).replace("</", "<\\/")
+        val extraQueryJson = org.json.JSONObject.quote(extraQuery).replace("</", "<\\/")
         val prevIndexJson = prevIndex?.toString() ?: "null"
         val nextIndexJson = nextIndex?.toString() ?: "null"
         val controlStateJson = controlSnapshot.toJson().toString().replace("</", "<\\/")
+        val defaultVolumeJson = options.defaultVolumePercent.toString()
+        val defaultSpeedJson = formatSpeedValue(options.defaultSpeed)
+        val autoplayCountdownJson = options.autoplayCountdownSeconds.toString()
 
         return """
             <!doctype html>
@@ -315,7 +465,7 @@ object VideoHostPages {
             <title>$title</title>
             <style>$SHARED_CSS</style></head>
             <body>
-              <header><a class="back" href="/?sort=${sort.value}">${svg(Icons.ARROW_BACK, 18)} $backLabel</a></header>
+              <header><a class="back" href="$homeHref">${svg(Icons.ARROW_BACK, 18)} $backLabel</a></header>
               <main class="watch">
                 <div class="primary">
                   <div class="player-fullscreen-wrap" id="playerFullscreenWrap">
@@ -344,14 +494,10 @@ object VideoHostPages {
                                 <button id="muteBtn" type="button" title="靜音">${svg(Icons.VOLUME_UP)}</button>
                                 <input type="range" id="volume" min="0" max="100" value="100">
                               </div>
-                              <label class="settings-row">自動播放下一部 <input type="checkbox" id="autoplayNext" checked></label>
+                              <label class="settings-row">自動播放下一部 <input type="checkbox" id="autoplayNext"${if (options.autoplayNext) " checked" else ""}></label>
                               <label class="settings-row">播放速度
                                 <select id="speed" title="播放速度">
-                                  <option value="0.5">0.5x</option>
-                                  <option value="1" selected>1x</option>
-                                  <option value="1.25">1.25x</option>
-                                  <option value="1.5">1.5x</option>
-                                  <option value="2">2x</option>
+                                  ${buildSpeedOptionsHtml(options.defaultSpeed)}
                                 </select>
                               </label>
                             </div>
@@ -367,7 +513,10 @@ object VideoHostPages {
                 $sidebar
               </main>
               <script>$BACK_TO_HOME_TRAP_SCRIPT</script>
-              <script>${buildWatchPageScript(relativePathJson, prevIndexJson, nextIndexJson, sortJson, controlStateJson)}</script>
+              <script>${buildWatchPageScript(
+                  relativePathJson, prevIndexJson, nextIndexJson, sortJson, extraQueryJson, controlStateJson,
+                  defaultVolumeJson, defaultSpeedJson, autoplayCountdownJson,
+              )}</script>
             </body>
             </html>
             """.trimIndent()
@@ -375,7 +524,7 @@ object VideoHostPages {
 
     /** 右側影片清單:依目前選的排序方式列出全部影片(含目前播放中的那一部),每筆都附縮圖,
      * 目前播放中的那筆用樣式標示、不能再點。 */
-    private fun buildSidebarItems(manifest: List<HostManifestEntry>, order: List<Int>, currentIndex: Int, sort: VideoSort): String =
+    private fun buildSidebarItems(manifest: List<HostManifestEntry>, order: List<Int>, currentIndex: Int, sort: VideoSort, extraQuery: String): String =
         order.joinToString("\n") { i ->
             val entry = manifest[i]
             val isCurrent = i == currentIndex
@@ -396,7 +545,7 @@ object VideoHostPages {
             if (isCurrent) {
                 """<div class="side-item current">$thumb$info</div>"""
             } else {
-                """<a class="side-item" href="/watch?v=$i&sort=${sort.value}">$thumb$info</a>"""
+                """<a class="side-item" href="/watch?v=$i&sort=${sort.value}$extraQuery">$thumb$info</a>"""
             }
         }
 
@@ -405,12 +554,19 @@ object VideoHostPages {
         prevIndexJson: String,
         nextIndexJson: String,
         sortJson: String,
+        extraQueryJson: String,
         controlStateJson: String,
+        defaultVolumeJson: String,
+        defaultSpeedJson: String,
+        autoplayCountdownJson: String,
     ): String = """
         (function () {
-          var meta = { relativePath: $relativePathJson, prevIndex: $prevIndexJson, nextIndex: $nextIndexJson, sort: $sortJson };
-          function watchUrl(index) { return '/watch?v=' + index + '&sort=' + meta.sort; }
-          function watchUrlForPath(path) { return '/watch?path=' + encodeURIComponent(path) + '&sort=' + meta.sort; }
+          var meta = { relativePath: $relativePathJson, prevIndex: $prevIndexJson, nextIndex: $nextIndexJson, sort: $sortJson, extraQuery: $extraQueryJson };
+          var DEFAULT_VOLUME_PERCENT = $defaultVolumeJson;
+          var DEFAULT_SPEED = $defaultSpeedJson;
+          var AUTOPLAY_COUNTDOWN_SECONDS = $autoplayCountdownJson;
+          function watchUrl(index) { return '/watch?v=' + index + '&sort=' + meta.sort + meta.extraQuery; }
+          function watchUrlForPath(path) { return '/watch?path=' + encodeURIComponent(path) + '&sort=' + meta.sort + meta.extraQuery; }
           var ICON_PLAY = '${svg(Icons.PLAY_ARROW)}';
           var ICON_PAUSE = '${svg(Icons.PAUSE)}';
           var ICON_VOLUME_UP = '${svg(Icons.VOLUME_UP)}';
@@ -491,15 +647,12 @@ object VideoHostPages {
           }
 
           var savedVol = localStorage.getItem(volKey);
-          if (savedVol !== null) {
-            video.volume = Math.min(1, Math.max(0, parseFloat(savedVol)));
-            volume.value = String(Math.round(video.volume * 100));
-          }
+          video.volume = Math.min(1, Math.max(0, (savedVol !== null ? parseFloat(savedVol) : DEFAULT_VOLUME_PERCENT / 100)));
+          volume.value = String(Math.round(video.volume * 100));
+
           var savedSpeed = localStorage.getItem(speedKey);
-          if (savedSpeed !== null) {
-            video.playbackRate = parseFloat(savedSpeed);
-            speed.value = savedSpeed;
-          }
+          video.playbackRate = savedSpeed !== null ? parseFloat(savedSpeed) : DEFAULT_SPEED;
+          speed.value = String(video.playbackRate);
           updateMuteIcon();
 
           video.addEventListener('loadedmetadata', function () {
@@ -528,7 +681,7 @@ object VideoHostPages {
             localStorage.removeItem(posKey);
             if (meta.nextIndex === null || !autoplayNext.checked) { return; }
 
-            var secondsLeft = 5;
+            var secondsLeft = AUTOPLAY_COUNTDOWN_SECONDS;
             nextOverlay.hidden = false;
             nextOverlayText.textContent = '即將播放下一部…(' + secondsLeft + ')';
             autoplayTimer = setInterval(function () {

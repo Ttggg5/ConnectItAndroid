@@ -5,6 +5,7 @@ import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,6 +19,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -26,6 +29,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -45,6 +49,8 @@ import com.connectit.android.repo.AppSettings
 import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.service.ConnectItService
 import com.connectit.android.ui.components.AdaptiveContentWidth
+import com.connectit.android.video.VideoServerPlaybackOptions
+import com.connectit.android.video.VideoSort
 import kotlinx.coroutines.launch
 
 @Composable
@@ -64,6 +70,12 @@ fun SettingsScreen(service: ConnectItService, modifier: Modifier = Modifier) {
 
     var timeoutText by remember { mutableStateOf(settings.connectTimeoutSeconds.toString()) }
     LaunchedEffect(settings.connectTimeoutSeconds) { timeoutText = settings.connectTimeoutSeconds.toString() }
+
+    var autoplayCountdownText by remember { mutableStateOf(settings.videoAutoplayCountdownSeconds.toString()) }
+    LaunchedEffect(settings.videoAutoplayCountdownSeconds) { autoplayCountdownText = settings.videoAutoplayCountdownSeconds.toString() }
+
+    var extraExtensionsText by remember { mutableStateOf(formatExtraExtensions(settings.videoExtraExtensions)) }
+    LaunchedEffect(settings.videoExtraExtensions) { extraExtensionsText = formatExtraExtensions(settings.videoExtraExtensions) }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -212,6 +224,105 @@ fun SettingsScreen(service: ConnectItService, modifier: Modifier = Modifier) {
 
             HorizontalDivider()
 
+            Text("影片伺服器", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "下次開始分享影片時套用的預設值:清單排序方式、播放器初始行為,以及掃描資料夾時額外要當作影片的副檔名。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            var sortMenuExpanded by remember { mutableStateOf(false) }
+            Box {
+                OutlinedButton(onClick = { sortMenuExpanded = true }) {
+                    Text("預設排序方式:${VideoSort.entries.first { it.value == settings.videoDefaultSort }.label}")
+                }
+                DropdownMenu(expanded = sortMenuExpanded, onDismissRequest = { sortMenuExpanded = false }) {
+                    VideoSort.entries.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option.label) },
+                            onClick = {
+                                sortMenuExpanded = false
+                                scope.launch { service.settingsRepository.setVideoDefaultSort(option.value) }
+                            },
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Text("預設自動播放下一部")
+                Switch(
+                    checked = settings.videoAutoplayNext,
+                    onCheckedChange = { scope.launch { service.settingsRepository.setVideoAutoplayNext(it) } },
+                )
+            }
+
+            OutlinedTextField(
+                value = autoplayCountdownText,
+                onValueChange = { text -> if (text.all { it.isDigit() } && text.length <= 2) autoplayCountdownText = text },
+                label = { Text("自動播放倒數秒數(1-30)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedButton(onClick = {
+                scope.launch {
+                    service.settingsRepository.setVideoAutoplayCountdownSeconds(
+                        autoplayCountdownText.toIntOrNull() ?: VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS,
+                    )
+                }
+            }) {
+                Text("儲存倒數秒數")
+            }
+
+            Text("預設音量:${settings.videoDefaultVolumePercent}%", style = MaterialTheme.typography.bodySmall)
+            Slider(
+                value = settings.videoDefaultVolumePercent.toFloat(),
+                onValueChange = { value -> scope.launch { service.settingsRepository.setVideoDefaultVolumePercent(value.toInt()) } },
+                valueRange = 0f..100f,
+                steps = 99,
+            )
+
+            var speedMenuExpanded by remember { mutableStateOf(false) }
+            Box {
+                OutlinedButton(onClick = { speedMenuExpanded = true }) {
+                    Text("預設播放速度:${formatSpeedLabel(settings.videoDefaultSpeed)}")
+                }
+                DropdownMenu(expanded = speedMenuExpanded, onDismissRequest = { speedMenuExpanded = false }) {
+                    VideoServerPlaybackOptions.VALID_PLAYBACK_SPEEDS.forEach { speedOption ->
+                        DropdownMenuItem(
+                            text = { Text(formatSpeedLabel(speedOption)) },
+                            onClick = {
+                                speedMenuExpanded = false
+                                scope.launch { service.settingsRepository.setVideoDefaultSpeed(speedOption) }
+                            },
+                        )
+                    }
+                }
+            }
+
+            OutlinedTextField(
+                value = extraExtensionsText,
+                onValueChange = { extraExtensionsText = it },
+                label = { Text("額外支援的副檔名") },
+                placeholder = { Text("以逗號分隔,例如 .ogv, .3gp") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedButton(onClick = {
+                scope.launch {
+                    val applied = service.settingsRepository.setVideoExtraExtensions(extraExtensionsText)
+                    extraExtensionsText = formatExtraExtensions(applied)
+                }
+            }) {
+                Text("儲存額外副檔名")
+            }
+
+            HorizontalDivider()
+
             Text("近期紀錄", style = MaterialTheme.typography.titleMedium)
             Card(modifier = Modifier.fillMaxWidth().height(200.dp)) {
                 LazyColumn(modifier = Modifier.padding(8.dp)) {
@@ -233,6 +344,14 @@ fun SettingsScreen(service: ConnectItService, modifier: Modifier = Modifier) {
         }
     }
 }
+
+/** "0.5"/"1"/"1.25" 這種不帶多餘 ".0" 的格式,對應 Windows 設定頁下拉選單顯示的文字。 */
+private fun formatSpeedLabel(value: Double): String {
+    val trimmed = if (value == value.toLong().toDouble()) value.toLong().toString() else value.toString()
+    return "${trimmed}x"
+}
+
+private fun formatExtraExtensions(extensions: List<String>): String = extensions.joinToString(", ") { ".$it" }
 
 @Composable
 private fun ThemeOption(label: String, value: AppThemeMode, selected: AppThemeMode, onSelect: (AppThemeMode) -> Unit) {

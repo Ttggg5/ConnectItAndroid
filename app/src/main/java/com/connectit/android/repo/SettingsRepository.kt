@@ -3,11 +3,15 @@ package com.connectit.android.repo
 import android.content.Context
 import android.os.Build
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.connectit.android.video.VideoLibraryScanner
+import com.connectit.android.video.VideoServerPlaybackOptions
+import com.connectit.android.video.VideoSort
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -31,6 +35,15 @@ data class AppSettings(
     /** 上一次選取用來分享影片的 SAF 資料夾(content:// tree Uri 字串),只是記住上次選擇方便
      * 下次快速重新分享,不會在 App/服務啟動時自動開始分享。 */
     val videoShareFolderUri: String? = null,
+    /** 以下對應 Windows 端 VideoServerSettingsService:下次按「開始分享」影片時套用的預設值
+     * (清單排序方式、播放器初始行為、掃描資料夾時額外要當作影片的副檔名),不會在伺服器執行中即時生效。 */
+    val videoDefaultSort: String = VideoSort.DEFAULT_VALUE,
+    val videoAutoplayNext: Boolean = VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_NEXT,
+    val videoAutoplayCountdownSeconds: Int = VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS,
+    val videoDefaultVolumePercent: Int = VideoServerPlaybackOptions.DEFAULT_VOLUME_PERCENT,
+    val videoDefaultSpeed: Double = VideoServerPlaybackOptions.DEFAULT_PLAYBACK_SPEED,
+    /** 使用者額外加入的副檔名(內建清單以外),已正規化成小寫、不含開頭 '.'、不重複。 */
+    val videoExtraExtensions: List<String> = emptyList(),
 ) {
     companion object {
         const val DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
@@ -58,6 +71,12 @@ class SettingsRepository(private val context: Context) {
         val CONNECT_TIMEOUT_SECONDS = intPreferencesKey("connect_timeout_seconds")
         val PREFERRED_PORT = intPreferencesKey("preferred_port")
         val VIDEO_SHARE_FOLDER_URI = stringPreferencesKey("video_share_folder_uri")
+        val VIDEO_DEFAULT_SORT = stringPreferencesKey("video_default_sort")
+        val VIDEO_AUTOPLAY_NEXT = booleanPreferencesKey("video_autoplay_next")
+        val VIDEO_AUTOPLAY_COUNTDOWN_SECONDS = intPreferencesKey("video_autoplay_countdown_seconds")
+        val VIDEO_DEFAULT_VOLUME_PERCENT = intPreferencesKey("video_default_volume_percent")
+        val VIDEO_DEFAULT_SPEED = doublePreferencesKey("video_default_speed")
+        val VIDEO_EXTRA_EXTENSIONS = stringPreferencesKey("video_extra_extensions")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -71,6 +90,17 @@ class SettingsRepository(private val context: Context) {
                 .coerceIn(AppSettings.MIN_CONNECT_TIMEOUT_SECONDS, AppSettings.MAX_CONNECT_TIMEOUT_SECONDS),
             preferredPort = prefs[Keys.PREFERRED_PORT] ?: 0,
             videoShareFolderUri = prefs[Keys.VIDEO_SHARE_FOLDER_URI],
+            videoDefaultSort = prefs[Keys.VIDEO_DEFAULT_SORT]?.takeIf { sort -> VideoSort.entries.any { it.value == sort } }
+                ?: VideoSort.DEFAULT_VALUE,
+            videoAutoplayNext = prefs[Keys.VIDEO_AUTOPLAY_NEXT] ?: VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_NEXT,
+            videoAutoplayCountdownSeconds = (prefs[Keys.VIDEO_AUTOPLAY_COUNTDOWN_SECONDS]
+                ?: VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS)
+                .coerceIn(VideoServerPlaybackOptions.MIN_AUTOPLAY_COUNTDOWN_SECONDS, VideoServerPlaybackOptions.MAX_AUTOPLAY_COUNTDOWN_SECONDS),
+            videoDefaultVolumePercent = (prefs[Keys.VIDEO_DEFAULT_VOLUME_PERCENT] ?: VideoServerPlaybackOptions.DEFAULT_VOLUME_PERCENT)
+                .coerceIn(0, 100),
+            videoDefaultSpeed = prefs[Keys.VIDEO_DEFAULT_SPEED]?.takeIf { VideoServerPlaybackOptions.VALID_PLAYBACK_SPEEDS.contains(it) }
+                ?: VideoServerPlaybackOptions.DEFAULT_PLAYBACK_SPEED,
+            videoExtraExtensions = VideoLibraryScanner.parseExtraExtensions(prefs[Keys.VIDEO_EXTRA_EXTENSIONS] ?: ""),
         )
     }
 
@@ -117,6 +147,44 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit {
             if (uriString == null) it.remove(Keys.VIDEO_SHARE_FOLDER_URI) else it[Keys.VIDEO_SHARE_FOLDER_URI] = uriString
         }
+    }
+
+    suspend fun setVideoDefaultSort(sort: String) {
+        val normalized = if (VideoSort.entries.any { it.value == sort }) sort else VideoSort.DEFAULT_VALUE
+        context.dataStore.edit { it[Keys.VIDEO_DEFAULT_SORT] = normalized }
+    }
+
+    suspend fun setVideoAutoplayNext(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.VIDEO_AUTOPLAY_NEXT] = enabled }
+    }
+
+    suspend fun setVideoAutoplayCountdownSeconds(seconds: Int) {
+        val clamped = seconds.coerceIn(
+            VideoServerPlaybackOptions.MIN_AUTOPLAY_COUNTDOWN_SECONDS, VideoServerPlaybackOptions.MAX_AUTOPLAY_COUNTDOWN_SECONDS,
+        )
+        context.dataStore.edit { it[Keys.VIDEO_AUTOPLAY_COUNTDOWN_SECONDS] = clamped }
+    }
+
+    suspend fun setVideoDefaultVolumePercent(percent: Int) {
+        val clamped = percent.coerceIn(0, 100)
+        context.dataStore.edit { it[Keys.VIDEO_DEFAULT_VOLUME_PERCENT] = clamped }
+    }
+
+    suspend fun setVideoDefaultSpeed(speed: Double) {
+        val normalized = if (VideoServerPlaybackOptions.VALID_PLAYBACK_SPEEDS.contains(speed)) {
+            speed
+        } else {
+            VideoServerPlaybackOptions.DEFAULT_PLAYBACK_SPEED
+        }
+        context.dataStore.edit { it[Keys.VIDEO_DEFAULT_SPEED] = normalized }
+    }
+
+    /** [rawText] 逗號/分號/空白分隔的副檔名清單(見 [VideoLibraryScanner.parseExtraExtensions]),
+     * 回傳正規化後實際套用的清單,方便呼叫端把輸入框內容替換成正規化後的樣子。 */
+    suspend fun setVideoExtraExtensions(rawText: String): List<String> {
+        val normalized = VideoLibraryScanner.parseExtraExtensions(rawText)
+        context.dataStore.edit { it[Keys.VIDEO_EXTRA_EXTENSIONS] = normalized.joinToString(",") }
+        return normalized
     }
 
     fun defaultDeviceName(): String = Build.MODEL ?: "Android"

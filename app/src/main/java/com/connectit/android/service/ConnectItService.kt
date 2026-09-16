@@ -40,6 +40,7 @@ import com.connectit.android.util.SafUtils
 import com.connectit.android.video.HostManifestEntry
 import com.connectit.android.video.PlaybackControlState
 import com.connectit.android.video.VideoHostServer
+import com.connectit.android.video.VideoServerPlaybackOptions
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -286,7 +287,15 @@ class ConnectItService : LifecycleService() {
         lifecycleScope.launch {
             settingsRepository.setVideoShareFolderUri(treeUri.toString())
             val name = cachedSettings.deviceName
-            val started = videoHostServer.start(treeUri, name)
+            val options = VideoServerPlaybackOptions(
+                defaultSort = cachedSettings.videoDefaultSort,
+                autoplayNext = cachedSettings.videoAutoplayNext,
+                defaultVolumePercent = cachedSettings.videoDefaultVolumePercent,
+                defaultSpeed = cachedSettings.videoDefaultSpeed,
+                autoplayCountdownSeconds = cachedSettings.videoAutoplayCountdownSeconds,
+                extraExtensions = cachedSettings.videoExtraExtensions,
+            )
+            val started = videoHostServer.start(treeUri, name, options)
             if (started) {
                 videoDiscovery.advertise(name, videoHostServer.port)
                 _videoHostState.value = VideoHostUiState.Running(

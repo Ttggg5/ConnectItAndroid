@@ -45,6 +45,7 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
     private var manifestByRelativePath: Map<String, HostManifestEntry> = emptyMap()
     private var filesByRelativePath: Map<String, Uri> = emptyMap()
     private var serverName: String = ""
+    private var options: VideoServerPlaybackOptions = VideoServerPlaybackOptions()
 
     // 縮圖產生相對昂貴,同一支影片整個伺服器存活期間只算一次,存的是 Deferred 而不是結果本身,
     // 這樣同時間好幾個請求剛好都在搶同一支還沒算完的縮圖時,大家會一起等同一個工作的結果。
@@ -64,11 +65,13 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
     var manifestCount: Int = 0
         private set
 
-    /** 開始分享 [treeUri](SAF 選取的資料夾)裡的所有影片。回傳是否成功啟動。 */
-    suspend fun start(treeUri: Uri, name: String): Boolean {
+    /** 開始分享 [treeUri](SAF 選取的資料夾)裡的所有影片。[options] 是使用者在設定頁調整過的
+     * 自訂選項(預設排序、播放器預設行為、額外副檔名),省略時套用內建預設值。回傳是否成功啟動。 */
+    suspend fun start(treeUri: Uri, name: String, options: VideoServerPlaybackOptions = VideoServerPlaybackOptions()): Boolean {
         stop()
 
-        val scanned = VideoLibraryScanner.buildManifest(context, treeUri)
+        this.options = options
+        val scanned = VideoLibraryScanner.buildManifest(context, treeUri, options.extraExtensions)
         if (scanned.isEmpty()) {
             onStatusChanged?.invoke("找不到可分享的影片。")
             return false
@@ -208,11 +211,16 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
             }
 
             val sort = parseSortOption(request.path)
-            writeHtml(output, VideoHostPages.buildHomePageHtml(manifest, serverName, sort))
+            val flat = getQueryParam(request.path, "flat") == "1"
+            val folder = if (flat) "" else VideoHostPages.normalizeFolder(getQueryParam(request.path, "folder"))
+            writeHtml(output, VideoHostPages.buildHomePageHtml(manifest, serverName, sort, folder, flat))
             return
         }
 
         if (path.equals("/watch", ignoreCase = true)) {
+            val watchFlat = getQueryParam(request.path, "flat") == "1"
+            val watchFolder = if (watchFlat) "" else VideoHostPages.normalizeFolder(getQueryParam(request.path, "folder"))
+
             if (controlSnapshot.enabled) {
                 val activeRelativePath = controlSnapshot.videoRelativePath
                 if (activeRelativePath == null) {
@@ -229,7 +237,7 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
                 }
 
                 val sort = parseSortOption(request.path)
-                writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, activeIndex, sort, controlSnapshot))
+                writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, activeIndex, sort, controlSnapshot, options, watchFolder, watchFlat))
                 return
             }
 
@@ -240,7 +248,7 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
             }
 
             val sort = parseSortOption(request.path)
-            writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, index, sort, controlSnapshot))
+            writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, index, sort, controlSnapshot, options, watchFolder, watchFlat))
             return
         }
 
@@ -297,7 +305,7 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
     }
 
     private fun parseSortOption(rawPathWithQuery: String): VideoSort =
-        VideoSort.fromValue(getQueryParam(rawPathWithQuery, "sort"))
+        VideoSort.fromValue(getQueryParam(rawPathWithQuery, "sort") ?: options.defaultSort)
 
     // ===================== 回應寫出 =====================
 
