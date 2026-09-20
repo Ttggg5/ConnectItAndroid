@@ -24,6 +24,9 @@ import com.connectit.android.repo.SettingsRepository
 import com.connectit.android.ui.ConnectItApp
 import com.connectit.android.ui.MainViewModel
 import com.connectit.android.ui.theme.ConnectItTheme
+import com.connectit.android.ui.tv.ConnectItTvTheme
+import com.connectit.android.ui.tv.TvAppRoot
+import com.connectit.android.util.isTelevision
 
 class MainActivity : ComponentActivity() {
 
@@ -52,27 +55,50 @@ class MainActivity : ComponentActivity() {
         }
 
         val settingsRepository = SettingsRepository(applicationContext)
+        val isTv = isTelevision(this)
 
         setContent {
             val settings by settingsRepository.settings.collectAsState(
                 initial = AppSettings(settingsRepository.defaultDeviceName(), AppThemeMode.AUTO)
             )
 
-            ConnectItTheme(themeMode = settings.themeMode) {
-                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    val service by viewModel.service.collectAsState()
-                    val current = service
-                    if (current == null) {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator()
+            // Android TV 走完全獨立的一套畫面(androidx.tv.material3,見 ui/tv 底下),跟手機/平板版
+            // 的 androidx.compose.material3 沒辦法共用同一個 MaterialTheme/Surface——兩邊各自套用
+            // 自己那套元件庫的主題,業務邏輯(ConnectItService)仍然是同一份。
+            if (isTv) {
+                ConnectItTvTheme(themeMode = settings.themeMode) {
+                    androidx.tv.material3.Surface(modifier = Modifier.fillMaxSize()) {
+                        val service by viewModel.service.collectAsState()
+                        val current = service
+                        if (current == null) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator()
+                            }
+                        } else {
+                            LaunchedEffect(current) {
+                                current.exitRequested.collect { finishAndRemoveTask() }
+                            }
+                            TvAppRoot(service = current)
                         }
-                    } else {
-                        // 使用者從通知按下「關閉」:服務會自己停止,這裡另外把畫面也收掉並從
-                        // 最近使用的 App 清單移除,讓「關閉」的效果跟使用者預期的「整個 App 關掉」一致。
-                        LaunchedEffect(current) {
-                            current.exitRequested.collect { finishAndRemoveTask() }
+                    }
+                }
+            } else {
+                ConnectItTheme(themeMode = settings.themeMode) {
+                    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                        val service by viewModel.service.collectAsState()
+                        val current = service
+                        if (current == null) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator()
+                            }
+                        } else {
+                            // 使用者從通知按下「關閉」:服務會自己停止,這裡另外把畫面也收掉並從
+                            // 最近使用的 App 清單移除,讓「關閉」的效果跟使用者預期的「整個 App 關掉」一致。
+                            LaunchedEffect(current) {
+                                current.exitRequested.collect { finishAndRemoveTask() }
+                            }
+                            ConnectItApp(service = current)
                         }
-                        ConnectItApp(service = current)
                     }
                 }
             }

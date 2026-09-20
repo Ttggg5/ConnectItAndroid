@@ -12,9 +12,15 @@
          MediaStore.Downloads,不需要這個權限。 -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
+    <!-- 同一個 APK 手機、平板、Android TV 共用:兩個 feature 都設 required="false",
+         裝置沒有觸控螢幕(TV)或沒有 leanback(手機/平板)都不會被 Play 商店擋掉安裝。 -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
     <application
         android:name=".ConnectItApplication"
         android:allowBackup="true"
+        android:banner="@drawable/tv_banner"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher"
@@ -28,10 +34,17 @@
             android:launchMode="singleTop"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|uiMode|keyboardHidden"
             android:resizeableActivity="true"
+            android:banner="@drawable/tv_banner"
             android:theme="@style/Theme.ConnectIt">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Android TV 主畫面(Leanback launcher)找得到這個 App 的關鍵:少了這個
+                 category,App 裝得上 TV 但不會出現在 TV 的頻道/App 列表裡。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
 

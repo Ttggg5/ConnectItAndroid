@@ -62,6 +62,11 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
 
+    // Android TV 的 10-foot UI(D-pad 焦點高亮、TvLazyColumn/Grid、NavigationDrawer 等),
+    // 跟手機/平板用的 Material3 是兩套獨立元件庫,只在 ui/tv 底下的畫面使用。
+    implementation("androidx.tv:tv-foundation:1.0.0-alpha12")
+    implementation("androidx.tv:tv-material:1.0.0")
+
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.documentfile:documentfile:1.0.1")
 
