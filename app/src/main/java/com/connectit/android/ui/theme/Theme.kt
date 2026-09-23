@@ -1,28 +1,24 @@
 package com.connectit.android.ui.theme
 
 import android.app.Activity
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import com.connectit.android.repo.AppThemeMode
 
 private val LightColors = lightColorScheme(
-    primary = androidx.compose.ui.graphics.Color(0xFF6750A4),
-    secondary = androidx.compose.ui.graphics.Color(0xFF625B71),
+    primary = androidx.compose.ui.graphics.Color(0xFF6D83A6),
+    secondary = androidx.compose.ui.graphics.Color(0xFF889CBA),
 )
 
 private val DarkColors = darkColorScheme(
-    primary = androidx.compose.ui.graphics.Color(0xFFD0BCFF),
-    secondary = androidx.compose.ui.graphics.Color(0xFFCCC2DC),
+    primary = androidx.compose.ui.graphics.Color(0xFFBDC7D7),
+    secondary = androidx.compose.ui.graphics.Color(0xFFC9D2E0),
 )
 
 @Composable
@@ -33,14 +29,9 @@ fun ConnectItTheme(themeMode: AppThemeMode, content: @Composable () -> Unit) {
         AppThemeMode.AUTO -> isSystemInDarkTheme()
     }
 
-    val context = LocalContext.current
-    val dynamicAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-    val colorScheme = when {
-        dynamicAvailable && useDark -> dynamicDarkColorScheme(context)
-        dynamicAvailable && !useDark -> dynamicLightColorScheme(context)
-        useDark -> DarkColors
-        else -> LightColors
-    }
+    // 品牌色要跟 Windows 版一致,所以不用 Material You 動態色彩(會跟著裝置桌布跑掉),
+    // 固定套用 LightColors/DarkColors。
+    val colorScheme = if (useDark) DarkColors else LightColors
 
     val view = LocalView.current
     if (!view.isInEditMode) {

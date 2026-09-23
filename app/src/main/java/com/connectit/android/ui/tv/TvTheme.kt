@@ -8,13 +8,13 @@ import androidx.tv.material3.lightColorScheme
 import com.connectit.android.repo.AppThemeMode
 
 private val TvLightColors = lightColorScheme(
-    primary = Color(0xFF6750A4),
-    secondary = Color(0xFF625B71),
+    primary = Color(0xFF6D83A6),
+    secondary = Color(0xFF889CBA),
 )
 
 private val TvDarkColors = darkColorScheme(
-    primary = Color(0xFFD0BCFF),
-    secondary = Color(0xFFCCC2DC),
+    primary = Color(0xFFBDC7D7),
+    secondary = Color(0xFFC9D2E0),
 )
 
 /** TV 版用 androidx.tv.material3(跟手機版的 androidx.compose.material3 是兩套獨立元件庫,
