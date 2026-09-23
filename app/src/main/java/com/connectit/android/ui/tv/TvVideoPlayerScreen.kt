@@ -6,15 +6,21 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -28,7 +34,6 @@ import androidx.compose.material.icons.filled.SettingsRemote
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Speed
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -39,6 +44,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
@@ -46,6 +52,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
@@ -83,7 +90,8 @@ private val SpeedOptions = listOf(0.5f, 1f, 1.25f, 1.5f, 2f)
  * TV 版觀看畫面:沒有滑鼠 hover、沒有觸控,控制列改成任何遙控器按鍵都會喚出(對應手機版滑鼠移到
  * 影片上/點擊才顯示),喚出前 左/右鍵直接當作快轉/倒轉 10 秒、確認鍵當作播放/暫停——這是電視
  * 播放器常見的操作手感(YouTube/Netflix 的 TV app 都是這樣),不用先喚出控制列、把焦點移到按鈕上
- * 才能操作。進度條純顯示用(不是可拖曳的 Slider),拖曳進度在遙控器上遠不如快轉/倒轉按鈕好操作。
+ * 才能操作。進度條本身也是可 focus 的元件(見 TvSeekBar),focus 在上面時左右鍵直接跳轉進度,
+ * 跟其他按鈕一樣走方向鍵在控制列內移動焦點。
  */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
@@ -367,6 +375,7 @@ fun TvVideoPlayerScreen(
                     onNext = { showControls(); playIndex(currentIndex + 1) },
                     onRewind = { showControls(); seekBy(-SkipDurationMs) },
                     onForward = { showControls(); seekBy(SkipDurationMs) },
+                    onSeek = { deltaMs -> showControls(); seekBy(deltaMs) },
                     onPlayPause = { showControls(); togglePlayPause() },
                     speed = speed,
                     onCycleSpeed = {
@@ -409,6 +418,7 @@ private fun TvVideoControls(
     onNext: () -> Unit,
     onRewind: () -> Unit,
     onForward: () -> Unit,
+    onSeek: (Long) -> Unit,
     onPlayPause: () -> Unit,
     speed: Float,
     onCycleSpeed: () -> Unit,
@@ -425,8 +435,10 @@ private fun TvVideoControls(
     ) {
         Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1)
 
-        LinearProgressIndicator(
-            progress = { fractionOf(positionMs, durationMs) },
+        TvSeekBar(
+            positionMs = positionMs,
+            durationMs = durationMs,
+            onSeek = onSeek,
             modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
         )
         Text(
@@ -474,6 +486,52 @@ private fun TvVideoControls(
                 Text(" ${formatSpeedLabel(speed)}")
             }
         }
+    }
+}
+
+/**
+ * 可 focus 的進度條:遙控器移到上面時,左右鍵不再是控制列內的焦點移動,而是直接以
+ * [SkipDurationMs] 為單位跳轉播放進度(上下鍵維持正常的焦點移動,離開這裡回到按鈕列)。
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun TvSeekBar(
+    positionMs: Long,
+    durationMs: Long,
+    onSeek: (Long) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val focused by interactionSource.collectIsFocusedAsState()
+    val fraction = fractionOf(positionMs, durationMs)
+
+    Box(
+        modifier = modifier
+            .focusable(interactionSource = interactionSource)
+            .onKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                when (event.key) {
+                    Key.DirectionLeft -> { onSeek(-SkipDurationMs); true }
+                    Key.DirectionRight -> { onSeek(SkipDurationMs); true }
+                    else -> false
+                }
+            }
+            .height(if (focused) 10.dp else 6.dp)
+            .clip(RoundedCornerShape(50))
+            .background(Color.White.copy(alpha = 0.25f))
+            .border(
+                width = if (focused) 2.dp else 0.dp,
+                color = MaterialTheme.colorScheme.primary,
+                shape = RoundedCornerShape(50),
+            ),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .fillMaxWidth(fraction)
+                .clip(RoundedCornerShape(50))
+                .background(MaterialTheme.colorScheme.primary),
+        )
     }
 }
 
