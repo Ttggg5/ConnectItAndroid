@@ -6,6 +6,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import androidx.documentfile.provider.DocumentFile
@@ -107,29 +108,47 @@ object DownloadStorage {
         return ReceivedFile(FileOutputStream(candidate), candidate, "$relativeDir/${candidate.name}")
     }
 
-    /** 使用者在設定頁用 SAF 選取的任意資料夾,底下用 [DocumentFile] 依 [relativeSubDir] 逐層建立/尋找子目錄。 */
+    /**
+     * 使用者在設定頁用 SAF 選取的任意資料夾,底下依 [relativeSubDir] 逐層建立/尋找子目錄。
+     *
+     * 直接用 [DocumentsContract] + [SafUtils.listChildren](每層一次查詢)而不是
+     * [DocumentFile.findFile]——後者會對資料夾裡每個子項目各做一次查詢,資料夾傳輸時每收一個檔案
+     * 都要把目的資料夾整個重查一遍,檔案一多就變成平方級的跨程序查詢量。
+     */
     private fun createViaSafTree(context: Context, treeUri: Uri, relativeSubDir: String, fileName: String): ReceivedFile? {
-        var dir = DocumentFile.fromTreeUri(context, treeUri) ?: return null
+        val resolver = context.contentResolver
+        var dirId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: return null
         val displaySegments = mutableListOf(SafUtils.displayNameOf(context, treeUri))
 
         if (relativeSubDir.isNotEmpty()) {
             for (segment in relativeSubDir.split('/')) {
                 if (segment.isEmpty()) continue
-                dir = dir.findFile(segment)?.takeIf { it.isDirectory } ?: dir.createDirectory(segment) ?: return null
+                val existing = SafUtils.listChildren(resolver, treeUri, dirId).firstOrNull { it.isDirectory && it.name == segment }
+                dirId = existing?.documentId
+                    ?: createDocument(resolver, treeUri, dirId, DocumentsContract.Document.MIME_TYPE_DIR, segment)
+                        ?.let { DocumentsContract.getDocumentId(it) }
+                    ?: return null
                 displaySegments += segment
             }
         }
 
-        val uniqueName = uniqueSafFileName(dir, fileName)
-        val doc = dir.createFile(guessMimeType(fileName), uniqueName) ?: return null
-        val stream = context.contentResolver.openOutputStream(doc.uri) ?: return null
-        displaySegments += doc.name ?: uniqueName
-        return ReceivedFile(stream, doc.uri, displaySegments.joinToString("/"))
+        val existingNames = SafUtils.listChildren(resolver, treeUri, dirId).mapTo(HashSet()) { it.name }
+        val uniqueName = uniqueSafFileName(existingNames, fileName)
+        val docUri = createDocument(resolver, treeUri, dirId, guessMimeType(fileName), uniqueName) ?: return null
+        val stream = resolver.openOutputStream(docUri) ?: return null
+        displaySegments += DocumentFile.fromSingleUri(context, docUri)?.name ?: uniqueName
+        return ReceivedFile(stream, docUri, displaySegments.joinToString("/"))
     }
 
+    /** 跟 [DocumentFile.createFile]/[DocumentFile.createDirectory] 一樣,失敗時回傳 null 而不是丟例外。 */
+    private fun createDocument(resolver: ContentResolver, treeUri: Uri, parentDocumentId: String, mimeType: String, name: String): Uri? =
+        runCatching {
+            DocumentsContract.createDocument(resolver, DocumentsContract.buildDocumentUriUsingTree(treeUri, parentDocumentId), mimeType, name)
+        }.getOrNull()
+
     /** SAF 沒有內建的「檔名重複自動改名」行為,得自己檢查同目錄下是否已有同名檔案。 */
-    private fun uniqueSafFileName(dir: DocumentFile, fileName: String): String {
-        if (dir.findFile(fileName) == null) return fileName
+    private fun uniqueSafFileName(existingNames: Set<String>, fileName: String): String {
+        if (fileName !in existingNames) return fileName
 
         val dot = fileName.lastIndexOf('.')
         val base = if (dot > 0) fileName.substring(0, dot) else fileName
@@ -139,7 +158,7 @@ object DownloadStorage {
         do {
             candidate = "$base ($i)$ext"
             i++
-        } while (dir.findFile(candidate) != null)
+        } while (candidate in existingNames)
         return candidate
     }
 

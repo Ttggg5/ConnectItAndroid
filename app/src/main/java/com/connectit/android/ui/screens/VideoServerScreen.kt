@@ -78,8 +78,9 @@ enum class VideoSortOption(val label: String) {
 }
 
 fun List<VideoManifestEntry>.sortedByOption(option: VideoSortOption): List<VideoManifestEntry> = when (option) {
-    VideoSortOption.NAME_ASC -> sortedBy { it.name.lowercase() }
-    VideoSortOption.NAME_DESC -> sortedByDescending { it.name.lowercase() }
+    // 用不分大小寫的比較器,而不是 sortedBy { it.name.lowercase() }——後者每次比較都要產生兩個新字串。
+    VideoSortOption.NAME_ASC -> sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+    VideoSortOption.NAME_DESC -> sortedWith(compareByDescending(String.CASE_INSENSITIVE_ORDER) { it.name })
     VideoSortOption.SIZE_ASC -> sortedBy { it.size }
     VideoSortOption.SIZE_DESC -> sortedByDescending { it.size }
     VideoSortOption.DATE_DESC -> sortedByDescending { it.modifiedEpochMillis ?: 0L }
@@ -262,9 +263,25 @@ fun VideoServerScreen(
                 // 不會被目前瀏覽的資料夾侷限住——跟網頁版首頁的邏輯一致(見 VideoStreamingService.cs /
                 // VideoHostPages.kt 的說明)。flatten=true 時直接顯示這份清單;否則只列出 currentFolder
                 // 這一層,子資料夾顯示成資料夾卡片。
-                val sortedEntries = current.response.entries.sortedByOption(sort)
-                val subfolders = if (flatten) emptyList() else subfoldersOf(current.response.entries, currentFolder)
-                val visibleEntries = if (flatten) sortedEntries else entriesDirectlyIn(sortedEntries, currentFolder)
+                // 排序/過濾/計數都只跟這幾個值有關,用 remember 快取起來,不要每次重組(包含每個
+                // 格子捲進畫面時)都把整份清單重新排序、線性搜尋一遍。
+                val allEntries = current.response.entries
+                val sortedEntries = remember(allEntries, sort) { allEntries.sortedByOption(sort) }
+                val subfolders = remember(allEntries, currentFolder, flatten) {
+                    if (flatten) emptyList() else subfoldersOf(allEntries, currentFolder)
+                }
+                val visibleEntries = remember(sortedEntries, currentFolder, flatten) {
+                    if (flatten) sortedEntries else entriesDirectlyIn(sortedEntries, currentFolder)
+                }
+                val playList = if (flatten) sortedEntries else visibleEntries
+                val playIndexByPath = remember(playList) {
+                    playList.withIndex().associate { (index, entry) -> entry.relativePath to index }
+                }
+                val folderVideoCounts = remember(allEntries, currentFolder, subfolders) {
+                    subfolders.associateWith { name ->
+                        countVideosUnder(allEntries, if (currentFolder.isEmpty()) name else "$currentFolder/$name")
+                    }
+                }
 
                 Column(Modifier.fillMaxSize().padding(padding)) {
                     if (!flatten && currentFolder.isNotEmpty()) {
@@ -311,7 +328,7 @@ fun VideoServerScreen(
                     ) {
                         items(subfolders, key = { "folder:$it" }) { name ->
                             val childPath = if (currentFolder.isEmpty()) name else "$currentFolder/$name"
-                            val count = countVideosUnder(current.response.entries, childPath)
+                            val count = folderVideoCounts[name] ?: 0
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
                                 onClick = { currentFolder = childPath },
@@ -340,8 +357,7 @@ fun VideoServerScreen(
                             // 播放畫面的上一部/下一部、清單預設只在「目前這個資料夾」裡走,只有攤平
                             // 模式才會照全域排序橫跨所有資料夾——跟網頁版的邏輯一致(見
                             // VideoStreamingService.cs / VideoHostPages.kt 的說明)。
-                            val playList = if (flatten) sortedEntries else visibleEntries
-                            val index = playList.indexOf(entry)
+                            val index = playIndexByPath.getValue(entry.relativePath)
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
                                 // 只有在 ManifestState.Loaded 分支才會畫出這個可自由瀏覽的格線,遠端控制

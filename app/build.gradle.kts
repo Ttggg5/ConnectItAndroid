@@ -18,7 +18,10 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 對 Compose 的執行效能影響很大(未最佳化的 Compose 捲動、重組都明顯較慢),
+            // 同時移除沒用到的程式碼/資源、縮小 APK。
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

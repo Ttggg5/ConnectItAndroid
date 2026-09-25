@@ -2,7 +2,7 @@ package com.connectit.android.video
 
 import android.content.Context
 import android.net.Uri
-import androidx.documentfile.provider.DocumentFile
+import com.connectit.android.util.SafUtils
 
 /**
  * 掃描使用者透過 SAF 選取的資料夾(tree Uri),找出裡面所有影片檔案,對應 Windows 端的
@@ -36,23 +36,15 @@ object VideoLibraryScanner {
      * [com.connectit.android.repo.AppSettings.videoExtraExtensions]),不含開頭的 '.'。
      * 依相對路徑排序回傳,讓首頁清單順序穩定,也讓「上一部/下一部」照著這個順序前進有意義。 */
     fun buildManifest(context: Context, treeUri: Uri, extraExtensions: Collection<String> = emptyList()): List<ScannedEntry> {
-        val root = DocumentFile.fromTreeUri(context, treeUri) ?: return emptyList()
         val normalizedExtra = extraExtensions.map { it.removePrefix(".").lowercase() }.toSet()
         val out = mutableListOf<ScannedEntry>()
-        walk(root, "", out, normalizedExtra)
-        return out.sortedBy { it.relativePath.lowercase() }
-    }
-
-    private fun walk(dir: DocumentFile, prefix: String, out: MutableList<ScannedEntry>, extraExtensions: Set<String>) {
-        for (child in dir.listFiles()) {
-            val name = child.name ?: continue
-            val relativePath = if (prefix.isEmpty()) name else "$prefix/$name"
-            if (child.isDirectory) {
-                walk(child, relativePath, out, extraExtensions)
-            } else if (child.isFile && isVideoFile(name, extraExtensions)) {
-                out.add(ScannedEntry(name, relativePath, child.uri, child.length(), child.lastModified()))
+        // 用 SafUtils.walkTree(每個資料夾一次查詢)而不是 DocumentFile 逐檔查中繼資料,見該函式說明。
+        SafUtils.walkTree(context.contentResolver, treeUri) { relativePath, file ->
+            if (isVideoFile(file.name, normalizedExtra)) {
+                out.add(ScannedEntry(file.name, relativePath, file.uri, file.size, file.lastModified))
             }
         }
+        return out.sortedBy { it.relativePath.lowercase() }
     }
 
     /** 逗號/分號/空白/換行分隔的副檔名清單(有沒有前置 "." 都可以),正規化成小寫、不含開頭 "."、

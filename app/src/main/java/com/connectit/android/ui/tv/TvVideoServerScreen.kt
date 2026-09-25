@@ -188,9 +188,19 @@ fun TvVideoServerScreen(
                 }
             }
             is TvManifestState.Loaded -> {
-                val sortedEntries = current.response.entries.sortedByOption(sort)
-                val subfolders = subfoldersOf(current.response.entries, currentFolder)
-                val visibleEntries = entriesDirectlyIn(sortedEntries, currentFolder)
+                // 同手機版:用 remember 快取,不要每次重組(TV 上每次焦點移動都可能觸發)都重新排序/過濾。
+                val allEntries = current.response.entries
+                val sortedEntries = remember(allEntries, sort) { allEntries.sortedByOption(sort) }
+                val subfolders = remember(allEntries, currentFolder) { subfoldersOf(allEntries, currentFolder) }
+                val visibleEntries = remember(sortedEntries, currentFolder) { entriesDirectlyIn(sortedEntries, currentFolder) }
+                val indexByPath = remember(visibleEntries) {
+                    visibleEntries.withIndex().associate { (index, entry) -> entry.relativePath to index }
+                }
+                val folderVideoCounts = remember(allEntries, currentFolder, subfolders) {
+                    subfolders.associateWith { name ->
+                        countVideosUnder(allEntries, if (currentFolder.isEmpty()) name else "$currentFolder/$name")
+                    }
+                }
 
                 if (currentFolder.isNotEmpty()) {
                     Row(
@@ -231,7 +241,7 @@ fun TvVideoServerScreen(
                 ) {
                     items(subfolders, key = { "folder:$it" }) { name ->
                         val childPath = if (currentFolder.isEmpty()) name else "$currentFolder/$name"
-                        val count = countVideosUnder(current.response.entries, childPath)
+                        val count = folderVideoCounts[name] ?: 0
                         Card(onClick = { currentFolder = childPath }, modifier = Modifier.fillMaxWidth()) {
                             Column {
                                 Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f), contentAlignment = Alignment.Center) {
@@ -246,7 +256,7 @@ fun TvVideoServerScreen(
                     }
 
                     items(visibleEntries, key = { it.relativePath }) { entry ->
-                        val index = visibleEntries.indexOf(entry)
+                        val index = indexByPath.getValue(entry.relativePath)
                         Card(onClick = { onPlay(visibleEntries, index, false) }, modifier = Modifier.fillMaxWidth()) {
                             Column {
                                 Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {

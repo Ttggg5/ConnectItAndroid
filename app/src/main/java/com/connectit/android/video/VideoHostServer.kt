@@ -14,6 +14,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -23,6 +25,7 @@ import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 
 private const val COPY_BUFFER_SIZE = 64 * 1024
+private const val REQUEST_BUFFER_SIZE = 8 * 1024
 
 /**
  * 把這台 Android 裝置變成一個獨立的影片伺服器,對應 Windows 端的 VideoStreamingService.cs——
@@ -152,11 +155,15 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
         socket.use {
             try {
                 socket.tcpNoDelay = true
-                val input = socket.getInputStream()
-                val output = socket.getOutputStream()
+                // readLine 是逐 byte 讀的,沒有緩衝的話請求標頭每個 byte 都是一次系統呼叫;輸出端
+                // 也加緩衝,讓回應標頭跟小型內容(HTML/JSON/縮圖)合併成同一批封包送出,而不是在
+                // tcpNoDelay 底下各自變成獨立的小封包。
+                val input = BufferedInputStream(socket.getInputStream(), REQUEST_BUFFER_SIZE)
+                val output = BufferedOutputStream(socket.getOutputStream(), COPY_BUFFER_SIZE)
 
                 val request = readRequest(input) ?: return
                 routeRequest(output, request)
+                output.flush()
             } catch (e: IOException) {
             } catch (e: Exception) {
             }

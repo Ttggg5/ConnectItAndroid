@@ -3,6 +3,7 @@ package com.connectit.android.connection
 import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import com.connectit.android.model.ConnectedPeer
 import com.connectit.android.model.ConnectionRequest
 import com.connectit.android.model.FileOffer
@@ -35,6 +36,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
+import java.io.BufferedInputStream
 import java.io.IOException
 import java.io.OutputStream
 import java.net.InetSocketAddress
@@ -46,6 +48,12 @@ import java.util.UUID
 private const val REQUEST_TIMEOUT_MS = 10_000
 private const val RESPONSE_TIMEOUT_MS = 60_000
 private const val DEFAULT_CONNECT_TIMEOUT_MS = 10_000
+private const val PROGRESS_REPORT_INTERVAL_MS = 100L
+private const val FRAME_HEADER_SIZE = 5
+private const val SOCKET_READ_BUFFER_SIZE = 128 * 1024
+// 接收端每收到一個 64KB 區塊就直接寫進 MediaStore/SAF 串流,在 Android 11+ 底下每次寫入都要
+// 經過 FUSE,累積成較大的區塊再寫可以明顯減少這部分的開銷。
+private const val RECEIVE_WRITE_BUFFER_SIZE = 1024 * 1024
 
 /**
  * mDNS 找到裝置之後的實際 TCP 連線邏輯:連線請求/接受/拒絕交握,連線建立後的檔案/資料夾
@@ -83,6 +91,9 @@ class ConnectionEngine(
     @Volatile private var activeSocket: Socket? = null
     private var monitorJob: Job? = null
     private val writeMutex = Mutex()
+
+    /** 組裝訊框用的共用緩衝區,只在持有 [writeMutex] 時使用(見 [writeRaw])。 */
+    private val frameScratch = ByteArray(FRAME_HEADER_SIZE + FILE_CHUNK_SIZE)
 
     @Volatile private var activeTransfer: ActiveTransferState? = null
     @Volatile private var activeFolderSession: FolderSessionState? = null
@@ -241,7 +252,9 @@ class ConnectionEngine(
         monitorJob = scope.launch(Dispatchers.IO) {
             var remoteClosed = false
             try {
-                val input = socket.getInputStream()
+                // 加一層緩衝:每個訊框的 4+1 bytes 標頭如果直接對 socket 讀,每次都是一次系統呼叫。
+                // 交握階段的 readLine 是逐 byte 讀、不會多讀,所以到這裡才包不會吃掉任何資料。
+                val input = BufferedInputStream(socket.getInputStream(), SOCKET_READ_BUFFER_SIZE)
                 while (isActive) {
                     val frame = readFrame(input)
                     if (frame == null) {
@@ -285,7 +298,7 @@ class ConnectionEngine(
         val socket = activeSocket ?: return
         writeMutex.withLock {
             try {
-                writeFrame(socket.getOutputStream(), type, payload, 0, length)
+                writeFrame(socket.getOutputStream(), type, payload, 0, length, frameScratch)
             } catch (e: Exception) {
                 // 寫入失敗通常代表連線已經斷了,交給監控迴圈去處理斷線通知即可。
             }
@@ -522,7 +535,7 @@ class ConnectionEngine(
             onFileTransferEnded?.invoke(FileTransferEnded(transferId, TransferDirection.RECEIVING, TransferEndReason.FAILED, transfer.fileName))
             return
         }
-        transfer.outputStream = received.outputStream
+        transfer.outputStream = received.outputStream.buffered(RECEIVE_WRITE_BUFFER_SIZE)
         transfer.savedToken = received.token
         transfer.savedDisplayPath = received.displayPath
 
@@ -680,7 +693,7 @@ class ConnectionEngine(
             folderTransferId = session.folderTransferId,
             entryIndex = message.entryIndex,
         )
-        transfer.outputStream = received.outputStream
+        transfer.outputStream = received.outputStream.buffered(RECEIVE_WRITE_BUFFER_SIZE)
         transfer.savedToken = received.token
         transfer.savedDisplayPath = received.displayPath
         activeTransfer = transfer
@@ -811,8 +824,15 @@ class ConnectionEngine(
         reportProgress(transfer)
 
         if (transfer.transferredBytes == transfer.totalBytes) {
+            // outputStream 有包一層緩衝,最後一段資料是在 close() 時才真正寫進磁碟——這裡的失敗
+            // (例如空間不足)不能吞掉,否則會把沒寫完的檔案回報成接收成功。
+            try {
+                transfer.outputStream?.close()
+            } catch (e: Exception) {
+                failActiveTransfer(transfer, "寫入檔案失敗:${e.message}")
+                return
+            }
             activeTransfer = null
-            runCatching { transfer.outputStream?.close() }
             transfer.savedToken?.let { DownloadStorage.markComplete(contentResolver, it) }
             writeControl(FileControlMessage(type = "file-complete", transferId = transfer.transferId))
 
@@ -867,6 +887,14 @@ class ConnectionEngine(
     }
 
     private fun reportProgress(transfer: ActiveTransferState) {
+        // 每個 64KB 區塊都會呼叫到這裡,高速傳輸時一秒上千次;每次都組字串、更新 StateFlow、
+        // 觸發 Compose 重組完全是浪費,限制成固定間隔回報一次(最後一塊一定回報,讓進度條走到底)。
+        val now = SystemClock.elapsedRealtime()
+        if (transfer.transferredBytes < transfer.totalBytes && now - transfer.lastProgressReportAt < PROGRESS_REPORT_INTERVAL_MS) {
+            return
+        }
+        transfer.lastProgressReportAt = now
+
         val session = activeFolderSession
         var folderBytes: Long? = null
         var folderTotal: Long? = null
@@ -914,6 +942,7 @@ class ConnectionEngine(
         val entryIndex: Int? = null,
     ) {
         var transferredBytes: Long = 0L
+        var lastProgressReportAt: Long = 0L
         var outputStream: OutputStream? = null
 
         /** 接收端:[DownloadStorage.createFile] 回傳的 token(Uri 或 File),失敗/取消時要靠這個刪檔。 */
