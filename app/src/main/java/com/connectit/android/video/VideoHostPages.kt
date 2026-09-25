@@ -165,7 +165,7 @@ object VideoHostPages {
         """.trimIndent()
 
     /** 遠端控制模式已開啟、但主機還沒選任何影片時顯示——不能讓觀眾自己從首頁清單挑,只能等主機
-     * 選好,這裡定期輪詢 `/control/state`,一有影片就自動跳轉過去。 */
+     * 選好,這裡訂閱主機推送的 `/control/events`,主機一選片就自動跳轉過去。 */
     fun buildRemoteWaitingPageHtml(serverName: String): String {
         val title = htmlEncode(serverName)
         return """
@@ -177,12 +177,11 @@ object VideoHostPages {
             <body>
               <main class="waiting-page"><p>遙控模式已開啟,等待主機選擇影片…</p></main>
               <script>
-                setInterval(function () {
-                  fetch('/control/state').then(function (r) { return r.json(); }).then(function (state) {
-                    if (!state || !state.Enabled) { location.href = '/'; return; }
-                    if (state.VideoRelativePath) { location.href = '/watch?path=' + encodeURIComponent(state.VideoRelativePath); }
-                  }).catch(function () {});
-                }, 800);
+                $REMOTE_EVENTS_SCRIPT
+                subscribeRemoteState(function (state) {
+                  if (!state || !state.Enabled) { location.href = '/'; return; }
+                  if (state.VideoRelativePath) { location.href = '/watch?path=' + encodeURIComponent(state.VideoRelativePath); }
+                });
               </script>
             </body>
             </html>
@@ -760,8 +759,7 @@ object VideoHostPages {
             else if (e.key === 'm' || e.key === 'M') { muteBtn.click(); }
           });
 
-          // ===== 遠端控制模式:主機正在控制播放時,鎖住手動控制列,改成跟隨輪詢到的狀態播放 =====
-          var REMOTE_POLL_MS = 800;
+          // ===== 遠端控制模式:主機正在控制播放時,鎖住手動控制列,改成跟隨主機推送的狀態播放 =====
           var REMOTE_DRIFT_THRESHOLD_SEC = 1.5;
           var REMOTE_RESYNC_COOLDOWN_MS = 1000;
           var remoteEnabled = false;
@@ -782,7 +780,7 @@ object VideoHostPages {
               remoteEnabled = true;
               playerWrap.classList.add('remote-controlled');
               document.body.classList.add('remote-fullscreen');
-              // 這裡是輪詢回應後才觸發,不是使用者直接點擊觸發,不算瀏覽器要求的「使用者手勢」,
+              // 這裡是收到推送後才觸發,不是使用者直接點擊觸發,不算瀏覽器要求的「使用者手勢」,
               // 原生全螢幕 API 很可能會被擋下來——失敗就靠上面的 remote-fullscreen CSS 頂著,
               // 不需要特別處理這個 rejection。
               if (!document.fullscreenElement) { fullscreenWrap.requestFullscreen().catch(function () {}); }
@@ -811,9 +809,40 @@ object VideoHostPages {
           }
 
           applyRemoteState($controlStateJson);
-          setInterval(function () {
-            fetch('/control/state').then(function (r) { return r.json(); }).then(applyRemoteState).catch(function () {});
-          }, REMOTE_POLL_MS);
+          $REMOTE_EVENTS_SCRIPT
+          subscribeRemoteState(applyRemoteState);
         })();
         """.trimIndent()
+
+    /**
+     * 等待頁、觀看頁共用的 `/control/events` 訂閱函式(跟 Windows 端 VideoStreamingService.cs 的
+     * RemoteEventsScript 同一份):主機一有狀態變更就推送過來,不用每隔一段時間輪詢。
+     *
+     * 瀏覽器的 EventSource 遇到網路錯誤會自己重連,但如果主機直接從網路上消失(沒有正常關閉連線),
+     * 連線可能就一直卡著收不到東西——主機沒有變更時也會每 5 秒送一次心跳狀態,這裡超過 15 秒都沒
+     * 收到任何事件就視為連線已經死掉,主動重新連線。
+     *
+     * 刻意不 trimIndent():這段會被內插進其他也會 trimIndent() 的樣板裡,保留原本的縮排,才不會
+     * 讓外層樣板算出的共同縮排變成 0、整頁都沒被去掉縮排。
+     */
+    private val REMOTE_EVENTS_SCRIPT = """
+        function subscribeRemoteState(onState) {
+          var STALE_MS = 15000;
+          var source = null;
+          var lastEventAt = Date.now();
+          function connect() {
+            if (source) { source.close(); }
+            lastEventAt = Date.now();
+            source = new EventSource('/control/events');
+            source.onmessage = function (e) {
+              lastEventAt = Date.now();
+              var state;
+              try { state = JSON.parse(e.data); } catch (err) { return; }
+              onState(state);
+            };
+          }
+          connect();
+          setInterval(function () { if (Date.now() - lastEventAt > STALE_MS) { connect(); } }, 5000);
+        }
+    """
 }

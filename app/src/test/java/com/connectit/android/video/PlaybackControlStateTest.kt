@@ -224,4 +224,30 @@ class PlaybackControlStateTest {
         assertTrue(json.contains("\"Version\""))
         assertTrue(json.contains("\"UpdatedAtUtcMs\""))
     }
+
+    @Test
+    fun `versionChanges tracks snapshot version on every change`() {
+        val state = newState()
+        assertEquals(state.snapshot().version, state.versionChanges.value)
+
+        state.setEnabled(true)
+        state.setVideo("a.mp4")
+        state.seek(10_000)
+        state.setPlaying(false)
+
+        assertEquals(4L, state.versionChanges.value)
+        assertEquals(state.snapshot().version, state.versionChanges.value)
+    }
+
+    @Test
+    fun `versionChanges does not change when a setter is a no-op`() {
+        val state = newState()
+        state.setMuted(true)
+        val before = state.versionChanges.value
+
+        state.setMuted(true)
+        state.setEnabled(false)
+
+        assertEquals(before, state.versionChanges.value)
+    }
 }

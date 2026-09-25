@@ -1,12 +1,16 @@
 package com.connectit.android.video
 
 import android.os.SystemClock
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 
 /**
  * 遠端控制模式的播放狀態,對應 Windows 端 Services/PlaybackControlState.cs——用「碼表」模型
  * 記錄上次更新時的位置、當下是否在播放、跟一個 monotonic 時間戳,每次被問到時用經過的時間做
- * 外插算出「現在」的位置,觀眾端(HTTP 輪詢 `/control/state`)不需要自己處理時鐘校正。
+ * 外插算出「現在」的位置,觀眾端(主機透過 `/control/events` 推送,或舊版的 `/control/state`
+ * 輪詢)不需要自己處理時鐘校正。
  *
  * 主機端不一定真的在播放影片(遙控器介面可以只是選片/下指令),所以這裡完全不持有/依賴任何
  * ExoPlayer 實例,純粹是一個被動的資料模型;由 [com.connectit.android.service.ConnectItService]
@@ -40,11 +44,23 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
     private var muted = false
     private var version = 0L
 
+    private val _versionChanges = MutableStateFlow(0L)
+
+    /** 目前的 [Snapshot.version],每次狀態變更都會更新——`/control/events` 靠這個等待「下一次變更」,
+     * 一變更就把新狀態推送給觀眾端,不用觀眾端自己輪詢。 */
+    val versionChanges: StateFlow<Long> = _versionChanges.asStateFlow()
+
+    /** 呼叫端必須已持有 [gate]。 */
+    private fun bumpVersionLocked() {
+        version++
+        _versionChanges.value = version
+    }
+
     fun setEnabled(value: Boolean) {
         synchronized(gate) {
             if (enabled == value) return
             enabled = value
-            version++
+            bumpVersionLocked()
         }
     }
 
@@ -56,7 +72,7 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
             updatedAt = clockMs()
             updatedAtUtcMs = System.currentTimeMillis()
             isPlaying = autoplay
-            version++
+            bumpVersionLocked()
         }
     }
 
@@ -69,7 +85,7 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
             updatedAt = clockMs()
             updatedAtUtcMs = System.currentTimeMillis()
             isPlaying = playing
-            version++
+            bumpVersionLocked()
         }
     }
 
@@ -78,7 +94,7 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
             positionAtUpdate = positionMs.coerceAtLeast(0)
             updatedAt = clockMs()
             updatedAtUtcMs = System.currentTimeMillis()
-            version++
+            bumpVersionLocked()
         }
     }
 
@@ -87,7 +103,7 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
             val clamped = rate.coerceIn(0.25, 4.0)
             if (playbackRate == clamped) return
             playbackRate = clamped
-            version++
+            bumpVersionLocked()
         }
     }
 
@@ -96,7 +112,7 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
             val clamped = value.coerceIn(0.0, 1.0)
             if (volume == clamped) return
             volume = clamped
-            version++
+            bumpVersionLocked()
         }
     }
 
@@ -104,7 +120,7 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
         synchronized(gate) {
             if (muted == value) return
             muted = value
-            version++
+            bumpVersionLocked()
         }
     }
 
@@ -120,7 +136,7 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
             playbackRate = 1.0
             volume = 1.0
             muted = false
-            version++
+            bumpVersionLocked()
         }
     }
 

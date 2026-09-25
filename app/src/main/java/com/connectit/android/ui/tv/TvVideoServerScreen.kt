@@ -37,6 +37,7 @@ import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.model.VideoManifestResponse
 import com.connectit.android.net.fetchControlState
+import com.connectit.android.net.observeControlState
 import com.connectit.android.net.fetchVideoManifest
 import com.connectit.android.net.videoThumbnailUrl
 import com.connectit.android.ui.screens.VideoSortOption
@@ -48,8 +49,7 @@ import androidx.tv.material3.IconButton
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import androidx.tv.material3.OutlinedButton
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.first
 
 private sealed interface TvManifestState {
     data object Loading : TvManifestState
@@ -130,24 +130,22 @@ fun TvVideoServerScreen(
         }
     }
 
+    // 跟手機版 VideoServerScreen 一樣訂閱主機推送的狀態,跳進播放畫面後就停止訂閱。
     LaunchedEffect(server) {
-        while (isActive) {
-            delay(800)
-
+        observeControlState(server.host, server.port).first { controlState ->
             val response = when (val current = state) {
                 is TvManifestState.Loaded -> current.response
                 is TvManifestState.RemoteWaiting -> current.response
-                TvManifestState.Loading, TvManifestState.Failed -> continue
+                TvManifestState.Loading, TvManifestState.Failed -> return@first false
             }
 
-            val controlState = fetchControlState(server.host, server.port) ?: continue
             if (controlState.enabled) {
                 val index = controlState.videoRelativePath
                     ?.let { path -> response.entries.indexOfFirst { it.relativePath == path } }
                     ?.takeIf { it >= 0 }
                 if (index != null) {
                     onPlay(response.entries, index, true)
-                    return@LaunchedEffect
+                    return@first true
                 }
                 if (state !is TvManifestState.RemoteWaiting) {
                     state = TvManifestState.RemoteWaiting(response)
@@ -155,6 +153,7 @@ fun TvVideoServerScreen(
             } else if (state is TvManifestState.RemoteWaiting) {
                 state = TvManifestState.Loaded(response)
             }
+            false
         }
     }
 

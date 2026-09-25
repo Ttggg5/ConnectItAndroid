@@ -10,8 +10,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
@@ -26,6 +28,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 private const val COPY_BUFFER_SIZE = 64 * 1024
 private const val REQUEST_BUFFER_SIZE = 8 * 1024
+private const val CONTROL_EVENTS_HEARTBEAT_MS = 5_000L
+private const val CONTROL_EVENTS_RETRY_MS = 1_000
 
 /**
  * 把這台 Android 裝置變成一個獨立的影片伺服器,對應 Windows 端的 VideoStreamingService.cs——
@@ -269,6 +273,11 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
             return
         }
 
+        if (path.equals("/control/events", ignoreCase = true)) {
+            writeControlEvents(output)
+            return
+        }
+
         val mediaPrefix = "/media/"
         if (path.startsWith(mediaPrefix, ignoreCase = true)) {
             writeMedia(output, request, path.substring(mediaPrefix.length))
@@ -365,6 +374,36 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
         val payload = controlState.snapshot().toJson().toString().toByteArray(Charsets.UTF_8)
         writeHeaders(output, 200, "OK", listOf("Content-Type" to "application/json", "Content-Length" to payload.size.toString()))
         output.write(payload)
+    }
+
+    /**
+     * 遠端控制狀態的推送端點(Server-Sent Events,跟 Windows 端 VideoStreamingService.cs 同一套格式):
+     * 觀眾端只連一次、連線一直開著,主機這邊一有狀態變更(播放/暫停/拖曳進度/換片…)就立刻把新的
+     * snapshot 以一個 `data:` 事件推下去,不用觀眾端每隔一段時間打 `/control/state` 來問。
+     *
+     * 沒有變更時每 [CONTROL_EVENTS_HEARTBEAT_MS] 也會送一次目前狀態當心跳:觀眾端可以拿來校正
+     * 自己播放器累積的漂移(例如緩衝卡了一下),寫入失敗也代表觀眾已經離開,可以結束這條連線。
+     * 連線會一直持續到觀眾斷線(寫入丟 IOException)或伺服器 [stop](scope 被取消)。
+     */
+    private suspend fun writeControlEvents(output: OutputStream) {
+        writeHeaders(
+            output, 200, "OK",
+            listOf("Content-Type" to "text/event-stream; charset=utf-8", "Cache-Control" to "no-cache"),
+        )
+        // 瀏覽器 EventSource 斷線後的自動重連間隔。
+        output.write("retry: $CONTROL_EVENTS_RETRY_MS\n\n".toByteArray(Charsets.UTF_8))
+
+        while (true) {
+            val snapshot = controlState.snapshot()
+            output.write("data: ${snapshot.toJson()}\n\n".toByteArray(Charsets.UTF_8))
+            output.flush()
+
+            // 取 snapshot 之後才發生的變更也不會漏掉:versionChanges 已經不等於 snapshot.version,
+            // first 會立刻回傳。
+            withTimeoutOrNull(CONTROL_EVENTS_HEARTBEAT_MS) {
+                controlState.versionChanges.first { it != snapshot.version }
+            }
+        }
     }
 
     private suspend fun writeThumbnail(output: OutputStream, relativePath: String) {

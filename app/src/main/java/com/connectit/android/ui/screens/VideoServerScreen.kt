@@ -49,10 +49,10 @@ import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.model.VideoManifestResponse
 import com.connectit.android.net.fetchControlState
+import com.connectit.android.net.observeControlState
 import com.connectit.android.net.fetchVideoManifest
 import com.connectit.android.net.videoThumbnailUrl
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.first
 
 private sealed interface ManifestState {
     data object Loading : ManifestState
@@ -171,26 +171,24 @@ fun VideoServerScreen(
         }
     }
 
-    // 進畫面後持續輪詢,處理「稍後才發生」的狀態變化:主機在觀眾已經看著清單/等待畫面時才開啟
-    // 遠端控制、選片、或是把遠端控制關掉——都靠這個迴圈即時反映,不用使用者自己重新整理。
+    // 進畫面後持續訂閱主機推送的狀態,處理「稍後才發生」的狀態變化:主機在觀眾已經看著清單/
+    // 等待畫面時才開啟遠端控制、選片、或是把遠端控制關掉——主機一變更就推過來即時反映,不用
+    // 使用者自己重新整理,也不用這裡定時輪詢。跳進播放畫面後就停止訂閱(first 回傳 true)。
     LaunchedEffect(server) {
-        while (isActive) {
-            delay(800)
-
+        observeControlState(server.host, server.port).first { controlState ->
             val response = when (val current = state) {
                 is ManifestState.Loaded -> current.response
                 is ManifestState.RemoteWaiting -> current.response
-                ManifestState.Loading, ManifestState.Failed -> continue
+                ManifestState.Loading, ManifestState.Failed -> return@first false
             }
 
-            val controlState = fetchControlState(server.host, server.port) ?: continue
             if (controlState.enabled) {
                 val index = controlState.videoRelativePath
                     ?.let { path -> response.entries.indexOfFirst { it.relativePath == path } }
                     ?.takeIf { it >= 0 }
                 if (index != null) {
                     onPlay(response.entries, index, true)
-                    return@LaunchedEffect
+                    return@first true
                 }
                 if (state !is ManifestState.RemoteWaiting) {
                     state = ManifestState.RemoteWaiting(response)
@@ -198,6 +196,7 @@ fun VideoServerScreen(
             } else if (state is ManifestState.RemoteWaiting) {
                 state = ManifestState.Loaded(response)
             }
+            false
         }
     }
 

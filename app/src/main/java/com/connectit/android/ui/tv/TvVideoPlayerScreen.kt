@@ -73,7 +73,7 @@ import androidx.tv.material3.OutlinedButton
 import com.connectit.android.R
 import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
-import com.connectit.android.net.fetchControlState
+import com.connectit.android.net.observeControlState
 import com.connectit.android.net.videoMediaUrl
 import com.connectit.android.repo.PlaybackPreferences
 import kotlinx.coroutines.Job
@@ -244,36 +244,33 @@ fun TvVideoPlayerScreen(
         }
     }
 
+    // 跟手機版 VideoPlayerScreen 一樣訂閱主機推送的狀態,不用定時輪詢。
     LaunchedEffect(server) {
-        while (isActive) {
-            val state = fetchControlState(server.host, server.port)
-            if (state != null) {
-                remoteEnabled = state.enabled
-                if (state.enabled) {
-                    val targetIndex = state.videoRelativePath
-                        ?.let { path -> entries.indexOfFirst { it.relativePath == path } }
-                        ?.takeIf { it >= 0 }
-                    if (targetIndex != null && targetIndex != currentIndex) playIndex(targetIndex)
+        observeControlState(server.host, server.port).collect { state ->
+            remoteEnabled = state.enabled
+            if (!state.enabled) return@collect
 
-                    if (state.isPlaying && !exoPlayer.isPlaying) exoPlayer.play()
-                    else if (!state.isPlaying && exoPlayer.isPlaying) exoPlayer.pause()
+            val targetIndex = state.videoRelativePath
+                ?.let { path -> entries.indexOfFirst { it.relativePath == path } }
+                ?.takeIf { it >= 0 }
+            if (targetIndex != null && targetIndex != currentIndex) playIndex(targetIndex)
 
-                    val cooldownActive = System.currentTimeMillis() - lastRemoteResyncAt < 1_000L
-                    if (!cooldownActive && kotlin.math.abs(exoPlayer.currentPosition - state.positionMs) > 1_500L) {
-                        val duration = exoPlayer.duration
-                        val target = if (duration > 0) state.positionMs.coerceIn(0L, duration) else state.positionMs.coerceAtLeast(0L)
-                        exoPlayer.seekTo(target)
-                        lastRemoteResyncAt = System.currentTimeMillis()
-                    }
+            if (state.isPlaying && !exoPlayer.isPlaying) exoPlayer.play()
+            else if (!state.isPlaying && exoPlayer.isPlaying) exoPlayer.pause()
 
-                    if (exoPlayer.playbackParameters.speed != state.playbackRate.toFloat()) {
-                        exoPlayer.setPlaybackSpeed(state.playbackRate.toFloat())
-                    }
-                    val targetVolume = if (state.muted) 0f else state.volume.toFloat()
-                    if (kotlin.math.abs(exoPlayer.volume - targetVolume) > 0.001f) exoPlayer.volume = targetVolume
-                }
+            val cooldownActive = System.currentTimeMillis() - lastRemoteResyncAt < 1_000L
+            if (!cooldownActive && kotlin.math.abs(exoPlayer.currentPosition - state.positionMs) > 1_500L) {
+                val duration = exoPlayer.duration
+                val target = if (duration > 0) state.positionMs.coerceIn(0L, duration) else state.positionMs.coerceAtLeast(0L)
+                exoPlayer.seekTo(target)
+                lastRemoteResyncAt = System.currentTimeMillis()
             }
-            delay(800)
+
+            if (exoPlayer.playbackParameters.speed != state.playbackRate.toFloat()) {
+                exoPlayer.setPlaybackSpeed(state.playbackRate.toFloat())
+            }
+            val targetVolume = if (state.muted) 0f else state.volume.toFloat()
+            if (kotlin.math.abs(exoPlayer.volume - targetVolume) > 0.001f) exoPlayer.volume = targetVolume
         }
     }
 

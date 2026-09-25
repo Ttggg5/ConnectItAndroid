@@ -88,7 +88,7 @@ import coil.compose.AsyncImage
 import com.connectit.android.R
 import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
-import com.connectit.android.net.fetchControlState
+import com.connectit.android.net.observeControlState
 import com.connectit.android.net.videoMediaUrl
 import com.connectit.android.net.videoThumbnailUrl
 import com.connectit.android.repo.PlaybackPreferences
@@ -124,7 +124,7 @@ fun VideoPlayerScreen(
      * (見 [onBack])——遠端控制模式下不該讓觀眾回得去那個瀏覽畫面,道理跟不該顯示網站首頁清單一樣。 */
     onExitRemoteControl: () -> Unit,
     /** 進入畫面前(來自 manifest)對「主機是否開了遠端控制模式」的初步提示,只用來避免掛載瞬間
-     * 先閃一下自由控制列——真正即時、會持續更新的判斷來自下面對 `/control/state` 的輪詢。 */
+     * 先閃一下自由控制列——真正即時、會持續更新的判斷來自下面訂閱的主機推送([observeControlState])。 */
     remoteControlHint: Boolean = false,
 ) {
     val context = LocalContext.current
@@ -156,9 +156,9 @@ fun VideoPlayerScreen(
     // ——那些仍照 entries 原本的順序走(進這個畫面之前,在 VideoServerScreen 選好、固定下來的順序)。
     var sortOption by remember { mutableStateOf(VideoSortOption.NAME_ASC) }
 
-    // 遠端控制模式:主機正在控制播放時鎖住手動控制列,改成跟隨輪詢到的狀態播放(見下方
-    // fetchControlState 的輪詢迴圈)。remoteControlHint 只是掛載時的初始值,實際狀態一律以
-    // 輪詢結果為準,主機隨時可能開關這個模式。
+    // 遠端控制模式:主機正在控制播放時鎖住手動控制列,改成跟隨主機推送的狀態播放(見下方
+    // observeControlState 的訂閱)。remoteControlHint 只是掛載時的初始值,實際狀態一律以
+    // 主機推送的結果為準,主機隨時可能開關這個模式。
     var remoteEnabled by remember { mutableStateOf(remoteControlHint) }
     var lastRemoteResyncAt by remember { mutableStateOf(0L) }
 
@@ -334,47 +334,44 @@ fun VideoPlayerScreen(
         }
     }
 
-    // 遠端控制模式:不管目前 remoteEnabled 是不是 true,都持續輪詢主機的 `/control/state`——
-    // 這樣主機把模式關掉時,這裡下一輪就會自動偵測到並讓使用者恢復自由控制,不需要另外處理。
+    // 遠端控制模式:不管目前 remoteEnabled 是不是 true,都持續訂閱主機推送的狀態——主機一有
+    // 變更(播放/暫停/拖曳進度/換片/關掉遙控模式)就立刻推過來,不用這裡定時去問;沒有變更時
+    // 主機也會定期送心跳狀態,順便校正播放器累積的漂移。
     LaunchedEffect(server) {
-        while (isActive) {
-            val state = fetchControlState(server.host, server.port)
-            if (state != null) {
-                remoteEnabled = state.enabled
-                if (state.enabled) {
-                    val targetIndex = state.videoRelativePath
-                        ?.let { path -> entries.indexOfFirst { it.relativePath == path } }
-                        ?.takeIf { it >= 0 }
-                    if (targetIndex != null && targetIndex != currentIndex) {
-                        playIndex(targetIndex)
-                    }
+        observeControlState(server.host, server.port).collect { state ->
+            remoteEnabled = state.enabled
+            if (!state.enabled) return@collect
 
-                    if (state.isPlaying && !exoPlayer.isPlaying) {
-                        exoPlayer.play()
-                    } else if (!state.isPlaying && exoPlayer.isPlaying) {
-                        exoPlayer.pause()
-                    }
-
-                    val cooldownActive = System.currentTimeMillis() - lastRemoteResyncAt < 1_000L
-                    if (!cooldownActive && kotlin.math.abs(exoPlayer.currentPosition - state.positionMs) > 1_500L) {
-                        val duration = exoPlayer.duration
-                        val target = if (duration > 0) state.positionMs.coerceIn(0L, duration) else state.positionMs.coerceAtLeast(0L)
-                        exoPlayer.seekTo(target)
-                        lastRemoteResyncAt = System.currentTimeMillis()
-                    }
-
-                    // 遠端控制中,音量/靜音/播放速度也一併跟主機同步(控制列被鎖住了,觀眾本來
-                    // 就不能自己調),跟網頁版 applyRemoteState 的做法一致。
-                    if (exoPlayer.playbackParameters.speed != state.playbackRate.toFloat()) {
-                        exoPlayer.setPlaybackSpeed(state.playbackRate.toFloat())
-                    }
-                    val targetVolume = if (state.muted) 0f else state.volume.toFloat()
-                    if (kotlin.math.abs(exoPlayer.volume - targetVolume) > 0.001f) {
-                        exoPlayer.volume = targetVolume
-                    }
-                }
+            val targetIndex = state.videoRelativePath
+                ?.let { path -> entries.indexOfFirst { it.relativePath == path } }
+                ?.takeIf { it >= 0 }
+            if (targetIndex != null && targetIndex != currentIndex) {
+                playIndex(targetIndex)
             }
-            delay(800)
+
+            if (state.isPlaying && !exoPlayer.isPlaying) {
+                exoPlayer.play()
+            } else if (!state.isPlaying && exoPlayer.isPlaying) {
+                exoPlayer.pause()
+            }
+
+            val cooldownActive = System.currentTimeMillis() - lastRemoteResyncAt < 1_000L
+            if (!cooldownActive && kotlin.math.abs(exoPlayer.currentPosition - state.positionMs) > 1_500L) {
+                val duration = exoPlayer.duration
+                val target = if (duration > 0) state.positionMs.coerceIn(0L, duration) else state.positionMs.coerceAtLeast(0L)
+                exoPlayer.seekTo(target)
+                lastRemoteResyncAt = System.currentTimeMillis()
+            }
+
+            // 遠端控制中,音量/靜音/播放速度也一併跟主機同步(控制列被鎖住了,觀眾本來
+            // 就不能自己調),跟網頁版 applyRemoteState 的做法一致。
+            if (exoPlayer.playbackParameters.speed != state.playbackRate.toFloat()) {
+                exoPlayer.setPlaybackSpeed(state.playbackRate.toFloat())
+            }
+            val targetVolume = if (state.muted) 0f else state.volume.toFloat()
+            if (kotlin.math.abs(exoPlayer.volume - targetVolume) > 0.001f) {
+                exoPlayer.volume = targetVolume
+            }
         }
     }
 
