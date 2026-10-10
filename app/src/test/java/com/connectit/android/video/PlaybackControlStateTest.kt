@@ -250,4 +250,117 @@ class PlaybackControlStateTest {
 
         assertEquals(before, state.versionChanges.value)
     }
+    @Test
+    fun `snapshot while playing extrapolates position scaled by playback rate`() {
+        val clock = FakeClock()
+        val state = newState(clock::read)
+
+        state.setVideo("movies/a.mp4", startPositionMs = 0)
+        state.setPlaybackRate(2.0)
+        clock.nowMs = 3_000
+
+        assertEquals(6_000L, state.snapshot().positionMs)
+    }
+
+    @Test
+    fun `setPlaybackRate keeps position already played at the previous rate`() {
+        val clock = FakeClock()
+        val state = newState(clock::read)
+
+        state.setVideo("movies/a.mp4", startPositionMs = 0)
+        clock.nowMs = 4_000
+        state.setPlaybackRate(1.5)
+        clock.nowMs = 6_000
+
+        assertEquals(4_000L + 3_000L, state.snapshot().positionMs)
+    }
+
+    @Test
+    fun `position stops at duration and snapshot reports not playing once the end is reached`() {
+        val clock = FakeClock()
+        val state = newState(clock::read)
+
+        state.setVideo("movies/a.mp4", startPositionMs = 0)
+        state.setDuration("movies/a.mp4", 10_000)
+        clock.nowMs = 60_000
+
+        val snapshot = state.snapshot()
+        assertEquals(10_000L, snapshot.positionMs)
+        assertFalse(snapshot.isPlaying)
+    }
+
+    @Test
+    fun `setPlaying true after reaching the end restarts from the beginning`() {
+        val clock = FakeClock()
+        val state = newState(clock::read)
+
+        state.setVideo("movies/a.mp4", startPositionMs = 0)
+        state.setDuration("movies/a.mp4", 10_000)
+        clock.nowMs = 20_000
+        state.setPlaying(true)
+        clock.nowMs = 21_000
+
+        val snapshot = state.snapshot()
+        assertEquals(1_000L, snapshot.positionMs)
+        assertTrue(snapshot.isPlaying)
+    }
+
+    @Test
+    fun `stopIfReachedEnd pauses at the end exactly once`() {
+        val clock = FakeClock()
+        val state = newState(clock::read)
+
+        state.setVideo("movies/a.mp4", startPositionMs = 0)
+        state.setDuration("movies/a.mp4", 10_000)
+        clock.nowMs = 9_000
+        assertFalse(state.stopIfReachedEnd())
+
+        clock.nowMs = 12_000
+        val versionBefore = state.snapshot().version
+        assertTrue(state.stopIfReachedEnd())
+        assertFalse(state.stopIfReachedEnd())
+
+        val snapshot = state.snapshot()
+        assertEquals(10_000L, snapshot.positionMs)
+        assertFalse(snapshot.isPlaying)
+        assertEquals(versionBefore + 1, snapshot.version)
+    }
+
+    @Test
+    fun `stopIfReachedEnd does nothing without a known duration`() {
+        val clock = FakeClock()
+        val state = newState(clock::read)
+
+        state.setVideo("movies/a.mp4", startPositionMs = 0)
+        clock.nowMs = 60_000
+
+        assertFalse(state.stopIfReachedEnd())
+        assertTrue(state.snapshot().isPlaying)
+    }
+
+    @Test
+    fun `setDuration for a video that is no longer selected is ignored`() {
+        val clock = FakeClock()
+        val state = newState(clock::read)
+
+        state.setVideo("movies/a.mp4", startPositionMs = 0)
+        state.setVideo("movies/b.mp4", startPositionMs = 0)
+        state.setDuration("movies/a.mp4", 1_000)
+        clock.nowMs = 5_000
+
+        assertEquals(5_000L, state.snapshot().positionMs)
+    }
+
+    @Test
+    fun `setVideo clears the previous video's duration`() {
+        val clock = FakeClock()
+        val state = newState(clock::read)
+
+        state.setVideo("movies/a.mp4", startPositionMs = 0)
+        state.setDuration("movies/a.mp4", 1_000)
+        state.setVideo("movies/b.mp4", startPositionMs = 0)
+        clock.nowMs = 5_000
+
+        assertEquals(5_000L, state.snapshot().positionMs)
+    }
 }

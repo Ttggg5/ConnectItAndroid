@@ -14,6 +14,7 @@ import android.net.nsd.NsdManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
@@ -39,8 +40,12 @@ import com.connectit.android.util.DownloadStorage
 import com.connectit.android.util.SafUtils
 import com.connectit.android.video.HostManifestEntry
 import com.connectit.android.video.PlaybackControlState
+import com.connectit.android.video.VideoHostPages
 import com.connectit.android.video.VideoHostServer
 import com.connectit.android.video.VideoServerPlaybackOptions
+import com.connectit.android.video.VideoSort
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -51,7 +56,10 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.ceil
+import kotlin.random.Random
 
 sealed interface ConnectionUiState {
     data object Idle : ConnectionUiState
@@ -63,6 +71,21 @@ sealed interface VideoHostUiState {
     data object Idle : VideoHostUiState
     data class Running(val port: Int, val videoCount: Int, val folderName: String) : VideoHostUiState
 }
+
+/**
+ * 主機端遙控面板的播放清單設定:決定影片庫的顯示順序與上一部/下一部/自動播放下一部要切到哪一部。
+ * 對應 Windows 端遙控面板的排序下拉選單/隨機播放/自動播放下一部。[shuffleSeed] 讓同一輪隨機播放
+ * 期間順序固定(每次重算結果都一樣),只有重新開啟隨機播放才換一組。
+ */
+data class RemotePlaylistSettings(
+    val sort: VideoSort = VideoSort.NAME_ASC,
+    val shuffle: Boolean = VideoServerPlaybackOptions.DEFAULT_SHUFFLE,
+    val shuffleSeed: Int = 0,
+    val autoplayNext: Boolean = VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_NEXT,
+)
+
+/** 遙控模式下目前這部播完、正在倒數準備切到下一部時的狀態,供遙控畫面顯示倒數與「取消」。 */
+data class RemoteAutoplayCountdown(val nextRelativePath: String, val nextName: String, val secondsLeft: Int)
 
 data class TransferUiState(
     val title: String,
@@ -124,6 +147,18 @@ class ConnectItService : LifecycleService() {
         ),
     )
     val playbackState: StateFlow<PlaybackControlState.Snapshot> = _playbackState.asStateFlow()
+
+    private val _remotePlaylist = MutableStateFlow(RemotePlaylistSettings())
+    val remotePlaylist: StateFlow<RemotePlaylistSettings> = _remotePlaylist.asStateFlow()
+
+    private val _remoteAutoplayCountdown = MutableStateFlow<RemoteAutoplayCountdown?>(null)
+    val remoteAutoplayCountdown: StateFlow<RemoteAutoplayCountdown?> = _remoteAutoplayCountdown.asStateFlow()
+
+    // 自動播放下一部:主機端不一定真的在播放影片,所以「播完了」是由這個迴圈定期檢查碼表外插的位置
+    // 有沒有走到片尾(見 checkRemoteAutoplay)。放在服務裡而不是遙控畫面,離開遙控畫面也照樣會接下一部。
+    private var remoteAutoplayWatcher: Job? = null
+    private var remoteAutoplayCountdownSeconds = VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS
+    private var remoteAutoplayDeadline = 0L
 
     private val _connectionState = MutableStateFlow<ConnectionUiState>(ConnectionUiState.Idle)
     val connectionState: StateFlow<ConnectionUiState> = _connectionState.asStateFlow()
@@ -290,6 +325,7 @@ class ConnectItService : LifecycleService() {
             val options = VideoServerPlaybackOptions(
                 defaultSort = cachedSettings.videoDefaultSort,
                 autoplayNext = cachedSettings.videoAutoplayNext,
+                shuffle = cachedSettings.videoShuffle,
                 defaultVolumePercent = cachedSettings.videoDefaultVolumePercent,
                 defaultSpeed = cachedSettings.videoDefaultSpeed,
                 autoplayCountdownSeconds = cachedSettings.videoAutoplayCountdownSeconds,
@@ -303,6 +339,17 @@ class ConnectItService : LifecycleService() {
                     videoCount = videoHostServer.manifestCount,
                     folderName = SafUtils.displayNameOf(applicationContext, treeUri),
                 )
+                // 遙控面板的排序/隨機播放/自動播放沿用設定頁的影片伺服器預設值,之後在遙控畫面上的
+                // 調整只影響這一次分享,不會寫回設定。
+                _remotePlaylist.value = RemotePlaylistSettings(
+                    sort = VideoSort.fromValue(options.defaultSort),
+                    shuffle = options.shuffle,
+                    shuffleSeed = Random.nextInt(),
+                    autoplayNext = options.autoplayNext,
+                )
+                remoteAutoplayCountdownSeconds = options.autoplayCountdownSeconds
+                remoteControlCancelAutoplay()
+                startRemoteAutoplayWatcher()
             } else {
                 _videoHostState.value = VideoHostUiState.Idle
             }
@@ -311,6 +358,9 @@ class ConnectItService : LifecycleService() {
     }
 
     fun stopVideoServer() {
+        remoteAutoplayWatcher?.cancel()
+        remoteAutoplayWatcher = null
+        remoteControlCancelAutoplay()
         videoDiscovery.stopAdvertising()
         videoHostServer.stop()
         _videoHostState.value = VideoHostUiState.Idle
@@ -330,21 +380,32 @@ class ConnectItService : LifecycleService() {
     fun currentPlaybackSnapshot(): PlaybackControlState.Snapshot = playbackControlState.snapshot()
 
     fun setRemoteControlEnabled(enabled: Boolean) {
+        remoteControlCancelAutoplay()
         playbackControlState.setEnabled(enabled)
         _playbackState.value = playbackControlState.snapshot()
     }
 
     fun remoteControlPlayVideo(relativePath: String) {
+        remoteControlCancelAutoplay()
         playbackControlState.setVideo(relativePath)
         _playbackState.value = playbackControlState.snapshot()
+        // 讓外插的播放位置停在片尾:不知道長度的話,主機這邊的「碼表」在影片播完後還會一直往後跑,
+        // 觀眾端會一直被要求跳到片尾之後的位置。探測結果有快取,遙控畫面畫時間軸時不會再探測一次。
+        lifecycleScope.launch {
+            val durationMs = videoHostServer.getDurationMs(relativePath)
+            playbackControlState.setDuration(relativePath, durationMs)
+            _playbackState.value = playbackControlState.snapshot()
+        }
     }
 
     fun remoteControlSetPlaying(playing: Boolean) {
+        remoteControlCancelAutoplay()
         playbackControlState.setPlaying(playing)
         _playbackState.value = playbackControlState.snapshot()
     }
 
     fun remoteControlSeek(positionMs: Long) {
+        remoteControlCancelAutoplay()
         playbackControlState.seek(positionMs)
         _playbackState.value = playbackControlState.snapshot()
     }
@@ -364,17 +425,81 @@ class ConnectItService : LifecycleService() {
         _playbackState.value = playbackControlState.snapshot()
     }
 
-    /** 依 [hostManifestEntries] 的順序切到上一部/下一部,供遙控畫面的上一部/下一部按鈕用——
-     * 跟一般觀看端的上一部/下一部是同一種「在清單裡移動一格」的概念,只是這裡直接用 manifest
-     * 原始順序(遙控面板沒有排序下拉選單),不像觀看端會依使用者選的排序方式決定順序。 */
+    /** 依 [remotePlaylistEntries] 的順序切到上一部/下一部,供遙控畫面的上一部/下一部按鈕用——
+     * 跟一般觀看端的上一部/下一部是同一種「在清單裡移動一格」的概念。 */
     fun remoteControlSkip(delta: Int) {
-        val entries = hostManifestEntries()
-        if (entries.isEmpty()) return
+        remoteNeighborEntry(delta)?.let { remoteControlPlayVideo(it.relativePath) }
+    }
+
+    /** 遙控面板目前的播放清單順序:依 [remotePlaylist] 的排序方式(跟觀看頁共用
+     * [VideoHostPages.displayOrder]),開了隨機播放就再用 seed 洗牌一次。 */
+    fun remotePlaylistEntries(): List<HostManifestEntry> {
+        val manifest = hostManifestEntries()
+        val settings = _remotePlaylist.value
+        return VideoHostPages.displayOrder(manifest, settings.sort, settings.shuffle, settings.shuffleSeed).map { manifest[it] }
+    }
+
+    fun remoteControlSetSort(sort: VideoSort) {
+        _remotePlaylist.update { it.copy(sort = sort) }
+    }
+
+    /** 每次重新開啟都換一組 seed,不然關掉再打開會得到跟上次一模一樣的「隨機」順序。 */
+    fun remoteControlSetShuffle(enabled: Boolean) {
+        _remotePlaylist.update { it.copy(shuffle = enabled, shuffleSeed = if (enabled) Random.nextInt() else it.shuffleSeed) }
+    }
+
+    fun remoteControlSetAutoplayNext(enabled: Boolean) {
+        _remotePlaylist.update { it.copy(autoplayNext = enabled) }
+        if (!enabled) remoteControlCancelAutoplay()
+    }
+
+    fun remoteControlCancelAutoplay() {
+        _remoteAutoplayCountdown.value = null
+    }
+
+    /** 目前選片在播放清單裡往前/往後 [delta] 格的影片;還沒選片時從第一部開始,超出範圍回傳 null。 */
+    private fun remoteNeighborEntry(delta: Int): HostManifestEntry? {
+        val playlist = remotePlaylistEntries()
+        if (playlist.isEmpty()) return null
         val currentPath = playbackControlState.snapshot().videoRelativePath
-        val currentIndex = entries.indexOfFirst { it.relativePath == currentPath }
-        val nextIndex = (if (currentIndex >= 0) currentIndex else 0) + delta
-        if (nextIndex !in entries.indices) return
-        remoteControlPlayVideo(entries[nextIndex].relativePath)
+        val currentIndex = playlist.indexOfFirst { it.relativePath == currentPath }
+        return playlist.getOrNull(if (currentIndex < 0) 0 else currentIndex + delta)
+    }
+
+    private fun startRemoteAutoplayWatcher() {
+        remoteAutoplayWatcher?.cancel()
+        remoteAutoplayWatcher = lifecycleScope.launch {
+            while (isActive) {
+                delay(500)
+                checkRemoteAutoplay()
+            }
+        }
+    }
+
+    /**
+     * 遙控模式下目前選片播到片尾時(總長度探測結果見 [remoteControlPlayVideo]),先把狀態定在片尾、
+     * 改成暫停([PlaybackControlState.stopIfReachedEnd]),開了自動播放而且清單還有下一部就開始倒數,
+     * 倒數結束才切過去。總長度探測失敗時無從判斷播完了沒有,這種影片就不會自動接下一部。
+     */
+    private fun checkRemoteAutoplay() {
+        val countdown = _remoteAutoplayCountdown.value
+        if (countdown != null) {
+            val secondsLeft = ceil((remoteAutoplayDeadline - SystemClock.elapsedRealtime()) / 1000.0).toInt()
+            if (secondsLeft <= 0) {
+                remoteControlPlayVideo(countdown.nextRelativePath)
+            } else if (secondsLeft != countdown.secondsLeft) {
+                _remoteAutoplayCountdown.value = countdown.copy(secondsLeft = secondsLeft)
+            }
+            return
+        }
+
+        if (!playbackControlState.snapshot().enabled || !playbackControlState.stopIfReachedEnd()) return
+        _playbackState.value = playbackControlState.snapshot()
+
+        if (!_remotePlaylist.value.autoplayNext) return
+        val next = remoteNeighborEntry(1) ?: return
+        remoteAutoplayDeadline = SystemClock.elapsedRealtime() + remoteAutoplayCountdownSeconds * 1000L
+        _remoteAutoplayCountdown.value = RemoteAutoplayCountdown(next.relativePath, next.name, remoteAutoplayCountdownSeconds)
     }
 
     // ===================== 內部事件轉接 =====================

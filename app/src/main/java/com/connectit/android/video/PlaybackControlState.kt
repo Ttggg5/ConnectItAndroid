@@ -44,6 +44,10 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
     private var muted = false
     private var version = 0L
 
+    // 目前選片的總長度(主機端非同步探測,見 [setDuration]);知道長度後外插的位置會停在片尾,
+    // 不會在影片播完之後還一直往後跑,讓觀眾端以為要跳到片尾之後的位置。
+    private var durationMs: Long? = null
+
     private val _versionChanges = MutableStateFlow(0L)
 
     /** 目前的 [Snapshot.version],每次狀態變更都會更新——`/control/events` 靠這個等待「下一次變更」,
@@ -68,6 +72,7 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
     fun setVideo(relativePath: String, startPositionMs: Long = 0, autoplay: Boolean = true) {
         synchronized(gate) {
             videoRelativePath = relativePath
+            durationMs = null
             positionAtUpdate = startPositionMs.coerceAtLeast(0)
             updatedAt = clockMs()
             updatedAtUtcMs = System.currentTimeMillis()
@@ -78,10 +83,11 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
 
     fun setPlaying(playing: Boolean) {
         synchronized(gate) {
-            if (isPlaying == playing) return
+            val reachedEnd = reachedEndLocked()
+            if (isPlaying == playing && !reachedEnd) return
             // 切換播放狀態前,先把目前(外插後)的位置定住,否則從 playing 切成 paused 那一瞬間,
-            // 下一次 snapshot 會少算/多算這段時間。
-            positionAtUpdate = currentPositionLocked()
+            // 下一次 snapshot 會少算/多算這段時間。已經播到片尾時再按播放,就跟一般播放器一樣從頭播。
+            positionAtUpdate = if (playing && reachedEnd) 0 else currentPositionLocked()
             updatedAt = clockMs()
             updatedAtUtcMs = System.currentTimeMillis()
             isPlaying = playing
@@ -102,6 +108,10 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
         synchronized(gate) {
             val clamped = rate.coerceIn(0.25, 4.0)
             if (playbackRate == clamped) return
+            // 外插位置會乘上播放速度,換速度前先把目前位置定住,之後才用新速度往後算。
+            positionAtUpdate = currentPositionLocked()
+            updatedAt = clockMs()
+            updatedAtUtcMs = System.currentTimeMillis()
             playbackRate = clamped
             bumpVersionLocked()
         }
@@ -124,11 +134,37 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
         }
     }
 
+    /** 記錄 [relativePath] 的總長度。探測是非同步的,如果結果到的時候主機已經換到別部影片,就忽略。 */
+    fun setDuration(relativePath: String, durationMs: Long?) {
+        synchronized(gate) {
+            if (videoRelativePath != relativePath) return
+            this.durationMs = durationMs?.takeIf { it > 0 }
+        }
+    }
+
+    /**
+     * 播放中而且(外插後的)位置已經走到片尾時,把狀態定在片尾、改成暫停並回傳 true;其他情況
+     * (暫停中、還沒播完、不知道總長度)什麼都不做、回傳 false。供主機端「自動播放下一部」判斷
+     * 這部播完了沒有——檢查跟定住在同一把鎖裡做,定住之後就不會重複觸發。
+     */
+    fun stopIfReachedEnd(): Boolean {
+        synchronized(gate) {
+            if (!isPlaying || !reachedEndLocked()) return false
+            positionAtUpdate = currentPositionLocked()
+            updatedAt = clockMs()
+            updatedAtUtcMs = System.currentTimeMillis()
+            isPlaying = false
+            bumpVersionLocked()
+            return true
+        }
+    }
+
     /** 重新分享/停止分享時呼叫——遠端控制狀態不跨 session 保留,一律回到「關閉、沒選片」。 */
     fun reset() {
         synchronized(gate) {
             enabled = false
             videoRelativePath = null
+            durationMs = null
             isPlaying = false
             positionAtUpdate = 0
             updatedAt = clockMs()
@@ -145,7 +181,7 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
             return Snapshot(
                 enabled = enabled,
                 videoRelativePath = videoRelativePath,
-                isPlaying = isPlaying,
+                isPlaying = isPlaying && !reachedEndLocked(),
                 positionMs = currentPositionLocked(),
                 playbackRate = playbackRate,
                 volume = volume,
@@ -156,9 +192,19 @@ class PlaybackControlState(private val clockMs: () -> Long = { SystemClock.elaps
         }
     }
 
-    /** 呼叫端必須已持有 [gate]。播放中的話用經過的時間外插目前位置,暫停中就是定住的那個值。 */
-    private fun currentPositionLocked(): Long =
-        if (isPlaying) positionAtUpdate + (clockMs() - updatedAt).coerceAtLeast(0) else positionAtUpdate
+    /** 呼叫端必須已持有 [gate]。播放中的話用經過的時間(乘上播放速度)外插目前位置,暫停中就是
+     * 定住的那個值;知道總長度時不會超過片尾。 */
+    private fun currentPositionLocked(): Long {
+        val position = if (isPlaying) {
+            positionAtUpdate + ((clockMs() - updatedAt).coerceAtLeast(0) * playbackRate).toLong()
+        } else {
+            positionAtUpdate
+        }
+        return durationMs?.let { position.coerceAtMost(it) } ?: position
+    }
+
+    /** 呼叫端必須已持有 [gate]。 */
+    private fun reachedEndLocked(): Boolean = durationMs?.let { currentPositionLocked() >= it } ?: false
 }
 
 /** 對應 Windows 端 `/control/state` 的 JSON 形狀,PascalCase 欄位名稱,`writeControlState`(輪詢用)

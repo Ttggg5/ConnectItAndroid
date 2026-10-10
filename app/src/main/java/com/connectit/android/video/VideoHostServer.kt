@@ -231,6 +231,8 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
         if (path.equals("/watch", ignoreCase = true)) {
             val watchFlat = getQueryParam(request.path, "flat") == "1"
             val watchFolder = if (watchFlat) "" else VideoHostPages.normalizeFolder(getQueryParam(request.path, "folder"))
+            val watchShuffle = parseShuffle(request.path)
+            val watchSeed = getQueryParam(request.path, "seed")?.toIntOrNull() ?: 0
 
             if (controlSnapshot.enabled) {
                 val activeRelativePath = controlSnapshot.videoRelativePath
@@ -248,7 +250,7 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
                 }
 
                 val sort = parseSortOption(request.path)
-                writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, activeIndex, sort, controlSnapshot, options, watchFolder, watchFlat))
+                writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, activeIndex, sort, controlSnapshot, options, watchFolder, watchFlat, watchShuffle, watchSeed))
                 return
             }
 
@@ -259,7 +261,7 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
             }
 
             val sort = parseSortOption(request.path)
-            writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, index, sort, controlSnapshot, options, watchFolder, watchFlat))
+            writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, index, sort, controlSnapshot, options, watchFolder, watchFlat, watchShuffle, watchSeed))
             return
         }
 
@@ -322,6 +324,11 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
 
     private fun parseSortOption(rawPathWithQuery: String): VideoSort =
         VideoSort.fromValue(getQueryParam(rawPathWithQuery, "sort") ?: options.defaultSort)
+
+    /** 跟 [parseSortOption] 同一個道理:網址沒帶 "shuffle" 查詢參數時(例如直接打 /watch?v=0,或首頁
+     * 清單上沒特別點「隨機播放」的一般影片卡片),退回分享時套用的「預設隨機播放」設定。 */
+    private fun parseShuffle(rawPathWithQuery: String): Boolean =
+        getQueryParam(rawPathWithQuery, "shuffle")?.let { it == "1" } ?: options.shuffle
 
     // ===================== 回應寫出 =====================
 

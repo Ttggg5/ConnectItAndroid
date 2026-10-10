@@ -2,8 +2,9 @@
 
 Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManager`)廣播/搜尋裝置,
 跟 Windows 端走同一套 TCP 交握協定與訊框協定,可以互相探索、互相連線、傳送檔案/資料夾;
-另外「影片」頁可以搜尋 Windows 端開啟的影片伺服器,並用原生播放器(Media3/ExoPlayer)觀看,
-功能對齊 Windows 觀看頁(排序、記住播放進度/音量/速度、自動播放下一部等)。
+另外「影片」頁可以搜尋其他裝置開啟的影片伺服器,並用原生播放器(Media3/ExoPlayer)觀看,
+功能對齊 Windows 觀看頁(排序、記住播放進度/音量/速度、自動播放下一部等);也可以把手機裡的
+影片資料夾分享出去當影片伺服器,並用遙控模式控制所有觀看端同步播放。
 
 ## 跟 Windows 端的協定對應
 
@@ -16,7 +17,7 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
 - **檔案/資料夾傳輸**:連線建立後,同一個 socket 改用長度前綴的二進位訊框協定(控制訊息 JSON
   / 檔案內容區塊),與 Windows 端 `ConnectionService.cs` 逐行對應,詳見
   `app/src/main/java/com/connectit/android/connection/ConnectionEngine.kt` 開頭的註解。
-- **影片觀看**:Android 端目前只作為**觀看端**——搜尋到 Windows 端開的影片伺服器後,自己
+- **影片觀看**:搜尋到其他裝置開的影片伺服器後,自己
   呼叫 `GET /manifest` 拿影片清單、`GET /thumbnail/{path}` 拿縮圖(Coil 載入),點下去用
   Media3(ExoPlayer)播放 `GET /media/{path}`(原生支援 HTTP Range,可以拖曳進度)。控制列整組
   自己刻(而不是用 PlayerView 內建的),對應 Windows 觀看頁 BuildWatchPageScript 的功能:
@@ -29,7 +30,14 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
   `onShowCustomView`/`onHideCustomView`)都無法解決。改用 ExoPlayer 搭配 `PlayerView` 的
   `surface_type="texture_view"`(見 `res/layout/view_video_player.xml`)才能正常顯示畫面——
   預設的 `SurfaceView` 會在系統視窗上打洞合成,跟 Compose 用 RenderNode 合成畫面的方式衝突。
-  還沒有實作「從手機分享影片給別人看」的功能(Windows 端獨有)。
+- **影片伺服器(主機端)**:`video/VideoHostServer.kt` 用 SAF 選的資料夾提供跟 Windows 端
+  `VideoStreamingService.cs` 同一組 HTTP 端點(`/`、`/watch`、`/manifest`、`/media/`、`/thumbnail/`、
+  `/control/state`、`/control/events`),網頁由 `video/VideoHostPages.kt` 產生,HTML/CSS/JS 刻意跟
+  Windows 端幾乎逐字一致,包含排序、資料夾瀏覽、隨機播放(網址帶 `shuffle=1&seed=...`)。
+- **遙控模式**:主機端遙控畫面(`ui/screens/VideoHostControlScreen.kt`,TV 版
+  `ui/tv/TvVideoHostControlScreen.kt`)把指令寫進 `video/PlaybackControlState.kt`(碼表模型),
+  觀看端透過 `/control/events` 同步。遙控畫面有自己的排序/隨機播放/自動播放下一部設定,
+  自動播放的倒數由 `ConnectItService` 負責,離開遙控畫面也照樣會接下一部。
 
 ## 專案結構
 
@@ -46,13 +54,15 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
 | `repo/PlaybackPreferences.kt` | 記住播放進度/音量/速度/自動播放下一部設定(DataStore Preferences) |
 | `ui/screens/VideoServerScreen.kt` | 影片清單頁(縮圖、排序選單) |
 | `ui/screens/VideoPlayerScreen.kt` | 原生播放頁(Media3 ExoPlayer + TextureView + 自製控制列) |
+| `video/VideoHostServer.kt`、`video/VideoHostPages.kt` | 影片伺服器主機端:HTTP 端點與網頁(對應 `VideoStreamingService.cs`) |
+| `video/PlaybackControlState.kt` | 遙控模式的播放狀態(對應 Windows 端同名類別) |
+| `ui/screens/VideoHostControlScreen.kt` | 主機端遙控畫面(選片、播放控制、排序/隨機播放/自動播放下一部) |
 | `ui/` | Jetpack Compose 畫面(裝置、已連線、影片、設定) |
 
 ## 跟 Windows 端的差異(刻意簡化之處)
 
 - **搜尋秒數設定**沒有對應項目:Windows 端要定期重送 mDNS 查詢是 Makaretu.Dns 函式庫的保險機制,
   Android 的 `NsdManager` 本身就是持續推播 `onServiceFound`/`onServiceLost`,不需要手動重複查詢。
-- Android 端不提供「影片伺服器」(分享手機裡的影片給別人看)功能,只能搜尋/觀看別人開的。
 
 ## 設定頁
 
@@ -67,9 +77,10 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
   (Storage Access Framework)選任意資料夾(見 `util/DownloadStorage.kt` 的 `createViaSafTree`)。
 - **連線設定**:監聽連接埠(留空 = 系統自動指派;變更需要重啟 App 才會生效)與主動連線的逾時秒數。
 - **影片伺服器**:對應 Windows 端 `VideoServerSettingsService`——下次按「選擇資料夾開始分享」時
-  套用的預設值:清單排序方式、自動播放下一部(含倒數秒數)、預設音量/速度,以及掃描資料夾時
+  套用的預設值:清單排序方式、自動播放下一部(含倒數秒數)、隨機播放、預設音量/速度,以及掃描資料夾時
   額外要當作影片的副檔名(內建清單以外)。只影響下一次開始分享套用的初始值,不會在伺服器執行
-  中即時生效,跟 `PlaybackControlState` 的遠端遙控是兩回事。
+  中即時生效。遙控畫面的排序/隨機播放/自動播放下一部也以這些值為初始值,但在遙控畫面上的調整
+  只影響當次分享,不會寫回設定。
 
 ## 建置與執行
 

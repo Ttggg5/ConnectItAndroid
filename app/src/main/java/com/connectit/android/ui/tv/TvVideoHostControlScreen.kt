@@ -15,6 +15,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
@@ -24,6 +26,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Speed
@@ -43,11 +46,14 @@ import coil.compose.AsyncImage
 import com.connectit.android.net.videoThumbnailUrl
 import com.connectit.android.service.ConnectItService
 import com.connectit.android.service.VideoHostUiState
+import com.connectit.android.video.VideoSort
 import androidx.tv.material3.Card
 import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.FilterChip
 import androidx.tv.material3.Icon
 import androidx.tv.material3.IconButton
 import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.OutlinedButton
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Switch
 import androidx.tv.material3.Text
@@ -68,6 +74,8 @@ fun TvVideoHostControlScreen(service: ConnectItService, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
 
     val hostState by service.videoHostState.collectAsState()
+    val playlistSettings by service.remotePlaylist.collectAsState()
+    val autoplayCountdown by service.remoteAutoplayCountdown.collectAsState()
     var snapshot by remember { mutableStateOf(service.currentPlaybackSnapshot()) }
     var durationMs by remember { mutableStateOf<Long?>(null) }
 
@@ -102,7 +110,8 @@ fun TvVideoHostControlScreen(service: ConnectItService, onBack: () -> Unit) {
             return
         }
 
-        val entries = service.hostManifestEntries()
+        // 依遙控面板選的排序/隨機播放排好的播放清單,只在設定改變或重新分享時才重算。
+        val entries = remember(playlistSettings, running) { service.remotePlaylistEntries() }
         val currentEntry = entries.firstOrNull { it.relativePath == snapshot.videoRelativePath }
 
         Surface(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
@@ -204,6 +213,37 @@ fun TvVideoHostControlScreen(service: ConnectItService, onBack: () -> Unit) {
                             service.remoteControlSetPlaybackRate(next)
                             snapshot = service.currentPlaybackSnapshot()
                         }) { Icon(Icons.Filled.Speed, contentDescription = "播放速度 ${snapshot.playbackRate}x") }
+                    }
+
+                    // 播放清單選項:排序方式用按鈕循環切換(遙控器上比下拉選單好操作),隨機播放/自動播放用開關式的 chip。
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedButton(onClick = {
+                            val sorts = VideoSort.entries
+                            service.remoteControlSetSort(sorts[(sorts.indexOf(playlistSettings.sort) + 1) % sorts.size])
+                        }) {
+                            Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = null)
+                            Text("排序:${playlistSettings.sort.label}", modifier = Modifier.padding(start = 8.dp))
+                        }
+                        FilterChip(
+                            selected = playlistSettings.shuffle,
+                            onClick = { service.remoteControlSetShuffle(!playlistSettings.shuffle) },
+                            leadingIcon = { Icon(Icons.Filled.Shuffle, contentDescription = null) },
+                        ) { Text("隨機播放") }
+                        FilterChip(
+                            selected = playlistSettings.autoplayNext,
+                            onClick = { service.remoteControlSetAutoplayNext(!playlistSettings.autoplayNext) },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.PlaylistPlay, contentDescription = null) },
+                        ) { Text("自動播放下一部") }
+                    }
+
+                    autoplayCountdown?.let { countdown ->
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Text(
+                                "即將播放下一部:${countdown.nextName}(${countdown.secondsLeft})",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            OutlinedButton(onClick = { service.remoteControlCancelAutoplay() }) { Text("取消") }
+                        }
                     }
                 }
             }

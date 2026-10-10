@@ -1,6 +1,7 @@
 package com.connectit.android.video
 
 import android.net.Uri
+import kotlin.random.Random
 
 /** 影片伺服器 manifest 裡的一筆項目,對應 Windows 端的 VideoManifestEntry.cs。 */
 data class HostManifestEntry(
@@ -203,8 +204,15 @@ object VideoHostPages {
     }
 
     /** 依排序方式,回傳 manifest 項目「顯示順序」的索引清單(內容還是指向原始索引,只是走訪順序不同)。
-     * 首頁清單、觀看頁側邊清單、上一部/下一部都共用同一份排序邏輯。 */
-    fun displayOrder(manifest: List<HostManifestEntry>, sort: VideoSort): List<Int> {
+     * 首頁清單、觀看頁側邊清單、上一部/下一部、主機端遙控畫面都共用同一份排序邏輯。
+     * [shuffle] 為真時,在排序結果之上用 [seed] 洗牌一次——同一組 seed 每次重算結果都一樣,讓「隨機播放」
+     * 這一輪瀏覽過程中上一部/下一部順序穩定、不會每次請求都重新洗一次牌(對應 Windows 端 GetDisplayOrder)。 */
+    fun displayOrder(manifest: List<HostManifestEntry>, sort: VideoSort, shuffle: Boolean = false, seed: Int = 0): List<Int> {
+        val ordered = sortedOrder(manifest, sort)
+        return if (shuffle) ordered.shuffled(Random(seed)) else ordered
+    }
+
+    private fun sortedOrder(manifest: List<HostManifestEntry>, sort: VideoSort): List<Int> {
         val indices = manifest.indices.toList()
         return when (sort) {
             VideoSort.NAME_ASC -> indices.sortedBy { manifest[it].name.lowercase() }
@@ -250,13 +258,16 @@ object VideoHostPages {
     fun buildHomePageHtml(manifest: List<HostManifestEntry>, serverName: String, sort: VideoSort, folder: String, flat: Boolean): String {
         val extraQuery = buildExtraQuery(folder, flat)
         val cardsHtml: String
+        val displayedVideoIndices: List<Int>
 
         if (flat) {
-            cardsHtml = buildVideoCardsHtml(manifest, displayOrder(manifest, sort), sort, extraQuery)
+            displayedVideoIndices = displayOrder(manifest, sort)
+            cardsHtml = buildVideoCardsHtml(manifest, displayedVideoIndices, sort, extraQuery)
         } else {
             val (subfolders, videoIndices) = getFolderContents(manifest, folder)
             val videoIndexSet = videoIndices.toHashSet()
             val orderedVideoIndices = displayOrder(manifest, sort).filter { videoIndexSet.contains(it) }
+            displayedVideoIndices = orderedVideoIndices
 
             val folderCards = subfolders.joinToString("\n") { name ->
                 val childPath = if (folder.isEmpty()) name else "$folder/$name"
@@ -284,6 +295,7 @@ object VideoHostPages {
         } else {
             """<a class="flatten-toggle" href="/?flat=1&sort=${sort.value}">顯示成單一清單</a>"""
         }
+        val shuffleButtonHtml = buildShuffleStartButtonHtml(displayedVideoIndices, sort, extraQuery)
 
         return """
             <!doctype html>
@@ -295,6 +307,7 @@ object VideoHostPages {
               <header>
                 <h1>$title</h1>
                 ${buildSortSelectHtml(sort.value, buildHomeSortPrefix(folder, flat))}
+                $shuffleButtonHtml
                 $flattenToggle
               </header>
               $breadcrumb
@@ -305,6 +318,19 @@ object VideoHostPages {
             </body>
             </html>
             """.trimIndent()
+    }
+
+    /** 首頁標頭的「隨機播放」按鈕:目前這個畫面(依 flat/folder 篩選過)沒有任何影片時不顯示。
+     * 點擊時用內嵌 JS 從 [videoIndices] 隨機挑一個,帶著新產生的 seed 導到觀看頁,從此進入「隨機播放」
+     * 狀態——後續上一部/下一部/側欄/自動播放下一部都會沿用同一組 seed(見 [buildExtraQuery])。 */
+    private fun buildShuffleStartButtonHtml(videoIndices: List<Int>, sort: VideoSort, extraQuery: String): String {
+        if (videoIndices.isEmpty()) return ""
+
+        // 用單引號包 onclick 屬性,因為值裡的 JSON 字串(sortJson/extraQueryJson)本身含雙引號。
+        val indicesJson = org.json.JSONArray(videoIndices).toString()
+        val sortJson = org.json.JSONObject.quote(sort.value)
+        val extraQueryJson = org.json.JSONObject.quote(extraQuery)
+        return """<a class="flatten-toggle" href="#" onclick='var indices=$indicesJson;var pick=indices[Math.floor(Math.random()*indices.length)];var seed=Math.floor(Math.random()*2147483647);location.href="/watch?v="+pick+"&sort="+$sortJson+"&shuffle=1&seed="+seed+$extraQueryJson;return false;'>隨機播放</a>"""
     }
 
     private fun buildVideoCardsHtml(manifest: List<HostManifestEntry>, indices: List<Int>, sort: VideoSort, extraQuery: String): String =
@@ -360,9 +386,13 @@ object VideoHostPages {
     fun normalizeFolder(folder: String?): String = folder?.trim('/') ?: ""
 
     /** 接在 "&sort={sort}" 後面的額外查詢字串——flat=true 帶 "&flat=1",folder 模式底下非根目錄
-     * 則帶 "&folder=...",讓 watch 頁的返回/上一部/下一部/側欄連結都能保留目前瀏覽的情境。 */
-    private fun buildExtraQuery(folder: String, flat: Boolean): String =
-        if (flat) "&flat=1" else if (folder.isEmpty()) "" else "&folder=${Uri.encode(folder)}"
+     * 則帶 "&folder=...",shuffle 開啟則另外帶 "&shuffle=1&seed=...",讓 watch 頁的返回/上一部/下一部/
+     * 側欄連結都能保留目前瀏覽的情境(含是否處於隨機播放狀態)。 */
+    private fun buildExtraQuery(folder: String, flat: Boolean, shuffle: Boolean = false, seed: Int = 0): String {
+        // Uri.encode 不會編碼單引號,這段查詢字串會被塞進 onclick/onchange 裡的 JS 單引號字串,要另外編掉。
+        val query = if (flat) "&flat=1" else if (folder.isEmpty()) "" else "&folder=${Uri.encode(folder).replace("'", "%27")}"
+        return if (shuffle) "$query&shuffle=1&seed=$seed" else query
+    }
 
     private fun buildHomeSortPrefix(folder: String, flat: Boolean): String {
         if (flat) return "/?flat=1&sort="
@@ -412,24 +442,33 @@ object VideoHostPages {
         options: VideoServerPlaybackOptions = VideoServerPlaybackOptions(),
         folder: String = "",
         flat: Boolean = false,
+        shuffle: Boolean = false,
+        seed: Int = 0,
     ): String {
         val entry = manifest[index]
 
         // 觀看頁的上一部/下一部、右側清單預設只在「目前這個資料夾」裡走(跟首頁逐層瀏覽一致),
         // 只有攤平模式才會照全域排序橫跨所有資料夾——不然使用者會在不知情的狀況下被帶去別的
-        // 資料夾。folder 模式下用的還是全域排序,只是先篩選成這個資料夾直屬的影片而已。
+        // 資料夾。folder 模式下用的還是全域排序,只是先篩選成這個資料夾直屬的影片而已。shuffle
+        // 開啟時,displayOrder 回傳的就已經是洗牌過的順序,不用再另外處理。
         val order = if (flat) {
-            displayOrder(manifest, sort)
+            displayOrder(manifest, sort, shuffle, seed)
         } else {
             val folderVideoIndices = getFolderContents(manifest, folder).second.toHashSet()
-            displayOrder(manifest, sort).filter { folderVideoIndices.contains(it) }
+            displayOrder(manifest, sort, shuffle, seed).filter { folderVideoIndices.contains(it) }
         }
         val position = order.indexOf(index)
         val hasPrev = position > 0
         val hasNext = position in 0 until order.size - 1
         val prevIndex = if (hasPrev) order[position - 1] else null
         val nextIndex = if (hasNext) order[position + 1] else null
-        val extraQuery = buildExtraQuery(folder, flat)
+        val extraQuery = buildExtraQuery(folder, flat, shuffle, seed)
+
+        // 隨機播放 checkbox 用:關閉時導到的網址(不帶 shuffle/seed),開啟時導到的網址前綴
+        // (JS 在使用者勾選當下才補上新產生的 seed,每次打開都重新洗一次牌)。
+        val baseExtraQuery = buildExtraQuery(folder, flat)
+        val shuffleOffHref = "/watch?v=$index&sort=${sort.value}$baseExtraQuery"
+        val shuffleOnHrefPrefix = "/watch?v=$index&sort=${sort.value}$baseExtraQuery&shuffle=1&seed="
 
         val sidebar = if (order.size > 1) {
             """
@@ -494,6 +533,7 @@ object VideoHostPages {
                                 <input type="range" id="volume" min="0" max="100" value="100">
                               </div>
                               <label class="settings-row">自動播放下一部 <input type="checkbox" id="autoplayNext"${if (options.autoplayNext) " checked" else ""}></label>
+                              <label class="settings-row">隨機播放 <input type="checkbox" id="shuffleCheckbox"${if (shuffle) " checked" else ""} onchange="location.href=this.checked ? '$shuffleOnHrefPrefix'+Math.floor(Math.random()*2147483647) : '$shuffleOffHref'"></label>
                               <label class="settings-row">播放速度
                                 <select id="speed" title="播放速度">
                                   ${buildSpeedOptionsHtml(options.defaultSpeed)}
@@ -656,19 +696,21 @@ object VideoHostPages {
 
           video.addEventListener('loadedmetadata', function () {
             seek.max = String(video.duration || 0);
-            var savedPos = parseFloat(localStorage.getItem(posKey) || '0');
+            // 遙控中的起始位置由主機決定(見下方 remoteSync),不套用這台觀眾自己上次看到的位置。
+            var savedPos = remoteEnabled ? 0 : parseFloat(localStorage.getItem(posKey) || '0');
             if (savedPos > 5 && savedPos < video.duration - 5) {
               video.currentTime = savedPos;
             }
             timeLabel.textContent = fmt(video.currentTime) + ' / ' + fmt(video.duration);
-            video.play().catch(function () {});
+            // 遙控中要不要播放由主機決定(見 remoteSync)。
+            if (!remoteEnabled) { video.play().catch(function () {}); }
           });
 
           video.addEventListener('timeupdate', function () {
             if (!seeking) { seek.value = String(video.currentTime); }
             timeLabel.textContent = fmt(video.currentTime) + ' / ' + fmt(video.duration);
             updateSeekFill();
-            if (video.currentTime > 2) {
+            if (video.currentTime > 2 && !remoteEnabled) {
               localStorage.setItem(posKey, String(video.currentTime));
             }
           });
@@ -678,7 +720,9 @@ object VideoHostPages {
 
           video.addEventListener('ended', function () {
             localStorage.removeItem(posKey);
-            if (meta.nextIndex === null || !autoplayNext.checked) { return; }
+            // 遙控中換不換下一部由主機決定;觀眾自己跳去下一部只會被伺服器導回主機正在播的那一部,
+            // 然後又從片尾播完、又倒數跳轉,變成一直重新載入的迴圈。
+            if (remoteEnabled || meta.nextIndex === null || !autoplayNext.checked) { return; }
 
             var secondsLeft = AUTOPLAY_COUNTDOWN_SECONDS;
             nextOverlay.hidden = false;
@@ -760,18 +804,124 @@ object VideoHostPages {
           });
 
           // ===== 遠端控制模式:主機正在控制播放時,鎖住手動控制列,改成跟隨主機推送的狀態播放 =====
-          var REMOTE_DRIFT_THRESHOLD_SEC = 1.5;
-          var REMOTE_RESYNC_COOLDOWN_MS = 1000;
+          //
+          // 主機推送的 PositionMs 是「送出當下」的位置,這裡記住收到的時間,之後每次檢查都用經過的時間
+          // (乘上播放速度)自己往後推算主機現在的位置,不用等下一次推送(心跳最多隔 5 秒)。
+          //
+          // 誤差處理分兩段:差距小時只微調播放速度慢慢追上/等主機,不中斷播放;差距大才直接跳轉。
+          // 跳轉後要等影片真的重新開始播放(緩衝完)才再次比對,而且跳轉時會往前多跳「上次跳轉到
+          // 恢復播放花了多久」——不然網路較慢時(例如 Android 主機從儲存空間讀檔),緩衝期間主機的
+          // 時間還在走,一比對又落後、又跳轉、又緩衝,永遠播不起來。
+          var REMOTE_SEEK_THRESHOLD_SEC = 3;
+          var REMOTE_NUDGE_THRESHOLD_SEC = 0.3;
+          var REMOTE_IN_SYNC_SEC = 0.1;
+          var REMOTE_NUDGE_FACTOR = 0.1;
+          var REMOTE_PAUSED_THRESHOLD_SEC = 0.25;
+          var REMOTE_SEEK_SETTLE_MS = 1000;
+          var REMOTE_SEEK_GIVE_UP_MS = 10000;
+          var REMOTE_MAX_SEEK_LEAD_MS = 5000;
+          var remoteSeekLatencyMs = 500;
           var remoteEnabled = false;
-          var lastResyncAt = 0;
+          var remoteState = null;
+          var remoteStateReceivedAt = 0;
+          var remoteInitialSynced = false;
+          var remoteSeekPending = false;
+          var remoteSeekStartedAt = 0;
+          var remoteSettleUntil = 0;
+
+          function remoteTargetSec() {
+            var sec = remoteState.PositionMs / 1000;
+            if (remoteState.IsPlaying) {
+              sec += (Date.now() - remoteStateReceivedAt) / 1000 * remoteState.PlaybackRate;
+            }
+            return isFinite(video.duration) ? Math.min(sec, video.duration) : sec;
+          }
+
+          function remoteSeekTo(sec) {
+            if (remoteState.IsPlaying) {
+              sec += Math.min(remoteSeekLatencyMs, REMOTE_MAX_SEEK_LEAD_MS) / 1000 * remoteState.PlaybackRate;
+            }
+            if (isFinite(video.duration)) { sec = Math.min(sec, video.duration); }
+            remoteSeekPending = true;
+            remoteSeekStartedAt = Date.now();
+            video.currentTime = Math.max(0, sec);
+          }
+
+          function setPlaybackRateIfChanged(rate) {
+            if (Math.abs(video.playbackRate - rate) > 0.001) { video.playbackRate = rate; }
+          }
+
+          function remoteSync() {
+            if (!remoteEnabled || !remoteState) { return; }
+
+            var baseRate = remoteState.PlaybackRate;
+            var target = remoteTargetSec();
+
+            // 播放/暫停一律跟著主機。這邊已經播到片尾、主機也在片尾時不要再 play(),不然會從頭重播。
+            if (!remoteState.IsPlaying) {
+              if (!video.paused) { video.pause(); }
+            } else if (video.paused && !(video.ended && isFinite(video.duration) && target >= video.duration - 0.5)) {
+              video.play().catch(function () {});
+            }
+
+            if (remoteSeekPending) {
+              var resumed = !video.seeking && video.readyState >= (remoteState.IsPlaying ? 3 : 2);
+              var waitedMs = Date.now() - remoteSeekStartedAt;
+              if (resumed) {
+                remoteSeekPending = false;
+                remoteSeekLatencyMs = waitedMs;
+                remoteSettleUntil = Date.now() + REMOTE_SEEK_SETTLE_MS;
+              } else if (waitedMs > REMOTE_SEEK_GIVE_UP_MS) {
+                // 一直沒緩衝完(例如載入失敗),不要永遠卡在「等待跳轉完成」。
+                remoteSeekPending = false;
+              }
+              return;
+            }
+            // 還沒載入到能跳轉、或正在跳轉時先不比對。
+            if (video.readyState < 1 || video.seeking) { return; }
+
+            var drift = target - video.currentTime;
+
+            // 剛載入完成時直接跳到主機的位置,不要先從頭播一小段再跳。
+            if (!remoteInitialSynced) {
+              remoteInitialSynced = true;
+              if (Math.abs(drift) > REMOTE_NUDGE_THRESHOLD_SEC) {
+                setPlaybackRateIfChanged(baseRate);
+                remoteSeekTo(target);
+                return;
+              }
+            }
+
+            if (!remoteState.IsPlaying) {
+              setPlaybackRateIfChanged(baseRate);
+              if (Math.abs(drift) > REMOTE_PAUSED_THRESHOLD_SEC) { remoteSeekTo(target); }
+              return;
+            }
+
+            // 正在緩衝(資料不夠往下播)時,主機的時間照走、這邊的進度停住,差距會一直變大——
+            // 這時候跳轉只會再觸發一次緩衝,等緩衝完再一起處理。
+            if (video.readyState < 3 || Date.now() < remoteSettleUntil) { return; }
+
+            if (Math.abs(drift) > REMOTE_SEEK_THRESHOLD_SEC) {
+              setPlaybackRateIfChanged(baseRate);
+              remoteSeekTo(target);
+            } else if (Math.abs(drift) > REMOTE_NUDGE_THRESHOLD_SEC) {
+              setPlaybackRateIfChanged(baseRate * (drift > 0 ? 1 + REMOTE_NUDGE_FACTOR : 1 - REMOTE_NUDGE_FACTOR));
+            } else if (Math.abs(drift) < REMOTE_IN_SYNC_SEC) {
+              setPlaybackRateIfChanged(baseRate);
+            }
+          }
 
           function applyRemoteState(state) {
             if (!state || !state.Enabled) {
               if (remoteEnabled) {
                 remoteEnabled = false;
+                remoteState = null;
+                remoteSeekPending = false;
                 playerWrap.classList.remove('remote-controlled');
                 document.body.classList.remove('remote-fullscreen');
                 if (document.fullscreenElement) { document.exitFullscreen().catch(function () {}); }
+                video.playbackRate = parseFloat(speed.value) || 1;
               }
               return;
             }
@@ -791,22 +941,21 @@ object VideoHostPages {
               return;
             }
 
-            if (state.IsPlaying && video.paused) { video.play().catch(function () {}); }
-            else if (!state.IsPlaying && !video.paused) { video.pause(); }
+            remoteState = state;
+            remoteStateReceivedAt = Date.now();
 
-            var targetSec = state.PositionMs / 1000;
-            var cooldownActive = (Date.now() - lastResyncAt) < REMOTE_RESYNC_COOLDOWN_MS;
-            if (!cooldownActive && Math.abs(video.currentTime - targetSec) > REMOTE_DRIFT_THRESHOLD_SEC) {
-              video.currentTime = isFinite(video.duration) ? Math.min(targetSec, Math.max(0, video.duration)) : targetSec;
-              lastResyncAt = Date.now();
-            }
-
-            // 遠端控制中,音量/靜音/播放速度也一併跟主機同步(控制列被鎖住了,觀眾本來就
-            // 不能自己調),跟 play/pause 一樣直接套用,不用額外的漂移容忍。
-            if (video.playbackRate !== state.PlaybackRate) { video.playbackRate = state.PlaybackRate; }
+            // 遠端控制中,音量/靜音也一併跟主機同步(控制列被鎖住了,觀眾本來就不能自己調)。
+            // 播放速度由 remoteSync 處理,因為追趕進度時會在主機的速度上微調。
             if (video.muted !== state.Muted) { video.muted = state.Muted; }
             if (Math.abs(video.volume - state.Volume) > 0.001) { video.volume = state.Volume; }
+
+            remoteSync();
           }
+
+          video.addEventListener('loadedmetadata', remoteSync);
+          video.addEventListener('playing', remoteSync);
+          video.addEventListener('canplay', remoteSync);
+          setInterval(remoteSync, 250);
 
           applyRemoteState($controlStateJson);
           $REMOTE_EVENTS_SCRIPT

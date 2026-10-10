@@ -220,7 +220,8 @@ fun TvVideoPlayerScreen(
                     val finished = entries.getOrNull(currentIndex) ?: return
                     scope.launch { prefs.clearPosition(videoKey(finished)) }
                     val nextIndex = currentIndex + 1
-                    if (autoplayNext && nextIndex in entries.indices) startAutoplayCountdown(nextIndex)
+                    // 遠端控制中由主機決定要不要/切到哪一部,觀看端不自己倒數跳下一部。
+                    if (autoplayNext && !remoteEnabled && nextIndex in entries.indices) startAutoplayCountdown(nextIndex)
                 }
             }
         }

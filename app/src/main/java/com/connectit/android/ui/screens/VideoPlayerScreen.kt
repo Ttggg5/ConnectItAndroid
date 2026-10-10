@@ -302,7 +302,8 @@ fun VideoPlayerScreen(
                     scope.launch { prefs.clearPosition(videoKey(finished)) }
                     val position = playOrder.indexOf(currentIndex)
                     val nextIndex = playOrder.getOrNull(position + 1)
-                    if (autoplayNext && nextIndex != null) {
+                    // 遠端控制中由主機決定要不要/切到哪一部,觀看端不自己倒數跳下一部。
+                    if (autoplayNext && !remoteEnabled && nextIndex != null) {
                         startAutoplayCountdown(nextIndex)
                     }
                 }
