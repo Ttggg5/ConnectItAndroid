@@ -542,7 +542,7 @@ class ConnectionEngine(
         transfer.savedToken = received.token
         transfer.savedDisplayPath = received.displayPath
 
-        launchWrite(FileControlMessage(type = "file-accept", transferId = transferId))
+        scope.launch(Dispatchers.IO) { acceptIncomingFile(transfer) }
     }
 
     fun respondToFolderOffer(transferId: String, accept: Boolean) {
@@ -701,7 +701,19 @@ class ConnectionEngine(
         transfer.savedDisplayPath = received.displayPath
         activeTransfer = transfer
 
-        writeControl(FileControlMessage(type = "file-accept", transferId = message.transferId))
+        acceptIncomingFile(transfer)
+    }
+
+    /**
+     * 接收端:回 file-accept。0 byte 的檔案不會有任何 Chunk 訊框,也就不會走到 [handleChunkFrame]
+     * 裡「收滿宣告大小」的完成判斷,所以接受後直接完成,否則雙方會一直互等
+     * (傳送端等 file-complete、接收端等資料)。
+     */
+    private suspend fun acceptIncomingFile(transfer: ActiveTransferState) {
+        writeControl(FileControlMessage(type = "file-accept", transferId = transfer.transferId))
+        if (transfer.totalBytes == 0L && activeTransfer === transfer) {
+            completeReceivedFile(transfer)
+        }
     }
 
     private fun handleFolderAccept(message: FileControlMessage) {
@@ -827,30 +839,34 @@ class ConnectionEngine(
         reportProgress(transfer)
 
         if (transfer.transferredBytes == transfer.totalBytes) {
-            // outputStream 有包一層緩衝,最後一段資料是在 close() 時才真正寫進磁碟——這裡的失敗
-            // (例如空間不足)不能吞掉,否則會把沒寫完的檔案回報成接收成功。
-            try {
-                transfer.outputStream?.close()
-            } catch (e: Exception) {
-                failActiveTransfer(transfer, "寫入檔案失敗:${e.message}")
-                return
-            }
-            activeTransfer = null
-            transfer.savedToken?.let { DownloadStorage.markComplete(contentResolver, it) }
-            writeControl(FileControlMessage(type = "file-complete", transferId = transfer.transferId))
-
-            val folderTransferId = transfer.folderTransferId
-            val session = activeFolderSession
-            if (folderTransferId != null && session != null && session.folderTransferId == folderTransferId) {
-                session.completedBytes += transfer.totalBytes
-                session.completedEntries += 1
-                return // 資料夾層級的完成事件要等收到傳送端送來的 folder-complete 才觸發。
-            }
-
-            onFileTransferEnded?.invoke(
-                FileTransferEnded(transfer.transferId, TransferDirection.RECEIVING, TransferEndReason.COMPLETED, transfer.fileName, transfer.savedDisplayPath)
-            )
+            completeReceivedFile(transfer)
         }
+    }
+
+    private suspend fun completeReceivedFile(transfer: ActiveTransferState) {
+        // outputStream 有包一層緩衝,最後一段資料是在 close() 時才真正寫進磁碟——這裡的失敗
+        // (例如空間不足)不能吞掉,否則會把沒寫完的檔案回報成接收成功。
+        try {
+            transfer.outputStream?.close()
+        } catch (e: Exception) {
+            failActiveTransfer(transfer, "寫入檔案失敗:${e.message}")
+            return
+        }
+        activeTransfer = null
+        transfer.savedToken?.let { DownloadStorage.markComplete(contentResolver, it) }
+        writeControl(FileControlMessage(type = "file-complete", transferId = transfer.transferId))
+
+        val folderTransferId = transfer.folderTransferId
+        val session = activeFolderSession
+        if (folderTransferId != null && session != null && session.folderTransferId == folderTransferId) {
+            session.completedBytes += transfer.totalBytes
+            session.completedEntries += 1
+            return // 資料夾層級的完成事件要等收到傳送端送來的 folder-complete 才觸發。
+        }
+
+        onFileTransferEnded?.invoke(
+            FileTransferEnded(transfer.transferId, TransferDirection.RECEIVING, TransferEndReason.COMPLETED, transfer.fileName, transfer.savedDisplayPath)
+        )
     }
 
     private suspend fun failActiveTransfer(transfer: ActiveTransferState, reason: String) {
