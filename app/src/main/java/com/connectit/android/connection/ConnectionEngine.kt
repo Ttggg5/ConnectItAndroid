@@ -276,6 +276,9 @@ class ConnectionEngine(
             abortActiveFolderSession(TransferEndReason.CONNECTION_CLOSED)
 
             if (remoteClosed) {
+                // 讀取迴圈因例外結束時 socket 可能還開著,一定要關掉,對方才會偵測到斷線,
+                // 而不是卡在等一個永遠不會來的回應(例如等 file-accept)。
+                socket.closeQuietly()
                 activeSocket = null
                 onStatusChanged?.invoke("對方已中斷連線。")
                 onRemoteDisconnected?.invoke()

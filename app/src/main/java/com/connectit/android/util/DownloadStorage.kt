@@ -40,7 +40,13 @@ object DownloadStorage {
      * [customTreeUri] 非 null 時,改用使用者透過 SAF 選取的資料夾(見 [SafUtils]),忽略預設的
      * 公用 Download/ConnectIt 位置。
      */
-    fun createFile(context: Context, relativeSubDir: String, fileName: String, customTreeUri: Uri? = null): ReceivedFile? {
+    fun createFile(context: Context, relativeSubDir: String, fileName: String, customTreeUri: Uri? = null): ReceivedFile? =
+        // 失敗一律回傳 null 而不是丟例外:呼叫端是連線的監控迴圈,例外往上冒會讓整條連線靜默死掉,
+        // 對方永遠收不到 file-accept/file-reject(例如 API 26-28 沒給儲存權限時 FileOutputStream
+        // 會丟 FileNotFoundException、SAF 資料夾權限被撤銷時查詢會丟 SecurityException)。
+        runCatching { createFileOrThrow(context, relativeSubDir, fileName, customTreeUri) }.getOrNull()
+
+    private fun createFileOrThrow(context: Context, relativeSubDir: String, fileName: String, customTreeUri: Uri?): ReceivedFile? {
         if (customTreeUri != null) {
             return createViaSafTree(context, customTreeUri, relativeSubDir, fileName)
         }
@@ -83,7 +89,12 @@ object DownloadStorage {
         }
 
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
-        val stream = resolver.openOutputStream(uri) ?: return null
+        val stream = runCatching { resolver.openOutputStream(uri) }.getOrNull()
+        if (stream == null) {
+            // 已經插入的 pending 項目要清掉,否則會在 Downloads 裡留下一筆空的殘留紀錄。
+            runCatching { resolver.delete(uri, null, null) }
+            return null
+        }
         return ReceivedFile(stream, uri, "$relativeDir/$fileName")
     }
 
