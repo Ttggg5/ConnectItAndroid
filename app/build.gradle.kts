@@ -16,8 +16,23 @@ android {
         versionName = "1.0"
     }
 
+    // Release 簽章從環境變數讀取(CI 由 GitHub Secrets 提供),沒設定時退回 debug key,
+    // 讓 release APK 至少還能安裝測試。
+    val releaseKeystore = System.getenv("RELEASE_KEYSTORE_PATH")?.let { file(it) }?.takeIf { it.exists() }
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             // R8 對 Compose 的執行效能影響很大(未最佳化的 Compose 捲動、重組都明顯較慢),
             // 同時移除沒用到的程式碼/資源、縮小 APK。
             isMinifyEnabled = true
