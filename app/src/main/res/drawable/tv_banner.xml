@@ -1,14 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android TV 主畫面用的橫幅(建議比例 320x180dp)。畫面背景色 + app 圖示的線條圖案,
+<!-- Android TV 主畫面用的橫幅(建議比例 320x180dp)。品牌漸層背景 + app 圖示的線條圖案,
      跟手機圖示(ic_launcher_background/foreground)同一套視覺語言,只是換成橫幅比例。 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="320dp"
     android:height="180dp"
     android:viewportWidth="320"
     android:viewportHeight="180">
-    <path
-        android:fillColor="@color/ic_launcher_background"
-        android:pathData="M0,0 h320 v180 h-320 z" />
+    <path android:pathData="M0,0 h320 v180 h-320 z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0"
+                android:startY="0"
+                android:endX="320"
+                android:endY="180"
+                android:startColor="@color/brand_indigo"
+                android:endColor="@color/brand_cyan" />
+        </aapt:attr>
+    </path>
     <group android:translateX="106" android:translateY="36">
         <path
             android:strokeColor="#FFFFFF"

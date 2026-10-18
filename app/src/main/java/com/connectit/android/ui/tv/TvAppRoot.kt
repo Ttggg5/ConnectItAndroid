@@ -5,7 +5,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.runtime.Composable
@@ -14,6 +16,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -27,8 +30,15 @@ import androidx.tv.material3.rememberDrawerState
 import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.service.ConnectItService
-import com.connectit.android.service.ConnectionUiState
+import com.connectit.android.repo.AppThemeMode
+import com.connectit.android.repo.RecentlyWatched
+import com.connectit.android.ui.components.ConnectFailureDialog
 import com.connectit.android.ui.components.ConnectionRequestDialog
+import com.connectit.android.ui.components.GradientAvatar
+import com.connectit.android.ui.components.WaitingForAcceptDialog
+import com.connectit.android.ui.screens.OnboardingScreen
+import com.connectit.android.ui.theme.ConnectItTheme
+import kotlinx.coroutines.launch
 
 private enum class TvTab(val label: String) { DEVICES("裝置"), VIDEO("影片"), SETTINGS("設定") }
 
@@ -37,12 +47,13 @@ private enum class TvTab(val label: String) { DEVICES("裝置"), VIDEO("影片")
 private sealed interface TvVideoNav {
     data object Root : TvVideoNav
     data object HostControl : TvVideoNav
-    data class Manifest(val server: DiscoveredDevice) : TvVideoNav
+    data class Manifest(val server: DiscoveredDevice, val resume: RecentlyWatched? = null) : TvVideoNav
     data class Player(
         val server: DiscoveredDevice,
         val entries: List<VideoManifestEntry>,
         val startIndex: Int,
         val remoteControlHint: Boolean,
+        val startPositionMs: Long? = null,
     ) : TvVideoNav
 }
 
@@ -59,13 +70,31 @@ fun TvAppRoot(service: ConnectItService) {
     var tab by remember { mutableStateOf(TvTab.DEVICES) }
     var videoNav by remember { mutableStateOf<TvVideoNav>(TvVideoNav.Root) }
 
-    val connectionState by service.connectionState.collectAsState()
     val pendingConnectionRequest by service.pendingConnectionRequest.collectAsState()
+    val connectingTo by service.connectingTo.collectAsState()
+    val connectFailure by service.connectFailure.collectAsState()
+    val settings by service.settingsRepository.settings.collectAsState(initial = null)
+    val scope = rememberCoroutineScope()
 
     // TV 上沒有 Snackbar 立足的空間(通常整個畫面被內容佔滿,也沒有觸控可以滑掉提示),事件訊息
     // 已經同時寫進「近期紀錄」(見 TvSettingsScreen),這裡只需要把這條 Flow 消耗掉,不用另外顯示。
     LaunchedEffect(service) {
         service.events.collect { }
+    }
+
+    // 對話框與首次啟動引導沿用手機版的元件(androidx.compose.material3),套上同一組品牌主題,
+    // 不然會是 Material 預設的紫色系。
+    val currentSettings = settings
+    if (currentSettings != null && !currentSettings.onboardingCompleted) {
+        ConnectItTheme(themeMode = AppThemeMode.DARK) {
+            OnboardingScreen(initialDeviceName = currentSettings.deviceName) { name ->
+                scope.launch {
+                    if (!name.isNullOrBlank()) service.settingsRepository.setDeviceName(name)
+                    service.settingsRepository.setOnboardingCompleted(true)
+                }
+            }
+        }
+        return
     }
 
     when (val nav = videoNav) {
@@ -78,8 +107,10 @@ fun TvAppRoot(service: ConnectItService) {
                 server = nav.server,
                 onBack = { videoNav = TvVideoNav.Root },
                 onPlay = { entries, startIndex, remoteControlEnabled ->
-                    videoNav = TvVideoNav.Player(nav.server, entries, startIndex, remoteControlEnabled)
+                    val resume = nav.resume?.takeIf { entries.getOrNull(startIndex)?.relativePath == it.relativePath }
+                    videoNav = TvVideoNav.Player(nav.server, entries, startIndex, remoteControlEnabled, resume?.positionMs)
                 },
+                resumePath = nav.resume?.relativePath,
             )
             return
         }
@@ -89,6 +120,7 @@ fun TvAppRoot(service: ConnectItService) {
                 entries = nav.entries,
                 startIndex = nav.startIndex,
                 remoteControlHint = nav.remoteControlHint,
+                startPositionMs = nav.startPositionMs,
                 onBack = { videoNav = TvVideoNav.Manifest(nav.server) },
                 onExitRemoteControl = { videoNav = TvVideoNav.Root },
             )
@@ -106,6 +138,12 @@ fun TvAppRoot(service: ConnectItService) {
                 modifier = Modifier.fillMaxHeight().padding(vertical = 24.dp),
                 verticalArrangement = Arrangement.Center,
             ) {
+                GradientAvatar(
+                    icon = Icons.Filled.Hub,
+                    size = 48.dp,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.padding(start = 12.dp, bottom = 24.dp),
+                )
                 TvTab.entries.forEach { entry ->
                     NavigationDrawerItem(
                         selected = tab == entry,
@@ -119,28 +157,30 @@ fun TvAppRoot(service: ConnectItService) {
         },
     ) {
         when (tab) {
-            TvTab.DEVICES -> {
-                val connected = connectionState
-                if (connected is ConnectionUiState.Connected) {
-                    TvConnectedScreen(service = service, peer = connected.peer)
-                } else {
-                    TvDevicesScreen(service = service)
-                }
-            }
+            TvTab.DEVICES -> TvDevicesScreen(service = service)
             TvTab.VIDEO -> TvVideoScreen(
                 service = service,
                 onWatch = { server -> videoNav = TvVideoNav.Manifest(server) },
                 onOpenHostControl = { videoNav = TvVideoNav.HostControl },
+                onResume = { server, entry -> videoNav = TvVideoNav.Manifest(server, entry) },
             )
             TvTab.SETTINGS -> TvSettingsScreen(service = service)
         }
     }
 
-    pendingConnectionRequest?.let { request ->
-        ConnectionRequestDialog(
-            request = request,
-            onRespond = { accept, trust -> service.respondToConnectionRequest(accept, trust) },
-        )
+    ConnectItTheme(themeMode = AppThemeMode.DARK) {
+        pendingConnectionRequest?.let { request ->
+            ConnectionRequestDialog(
+                request = request,
+                onRespond = { accept, trust -> service.respondToConnectionRequest(accept, trust) },
+            )
+        }
+        connectingTo?.let { device ->
+            WaitingForAcceptDialog(deviceName = device.displayName, onCancel = { service.cancelConnect() })
+        }
+        connectFailure?.let { failure ->
+            ConnectFailureDialog(failure = failure, onDismiss = { service.dismissConnectFailure() })
+        }
     }
 }
 

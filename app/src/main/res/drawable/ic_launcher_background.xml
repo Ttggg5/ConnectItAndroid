@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Aurora 品牌漸層(靛藍 → 青色),跟 App 內的漸層按鈕、Windows 端的品牌色一致。 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="@color/ic_launcher_background" />
+    <gradient
+        android:angle="315"
+        android:startColor="@color/brand_indigo"
+        android:endColor="@color/brand_cyan"
+        android:type="linear" />
 </shape>

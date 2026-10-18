@@ -96,6 +96,9 @@ dependencies {
     // 影片清單的縮圖載入/快取。
     implementation("io.coil-kt:coil-compose:2.7.0")
 
+    // 分享影片時產生網址的 QR Code(只用核心編碼器,不需要相機/掃描相關的模組)。
+    implementation("com.google.zxing:core:3.5.3")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")

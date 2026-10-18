@@ -4,355 +4,466 @@ import android.app.Activity
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BrightnessAuto
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.Card
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.MovieFilter
+import androidx.compose.material.icons.filled.NotificationsNone
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.WavingHand
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.connectit.android.repo.AppSettings
 import com.connectit.android.repo.AppThemeMode
+import com.connectit.android.repo.SettingsValidation
 import com.connectit.android.service.ConnectItService
 import com.connectit.android.ui.components.AdaptiveContentWidth
+import com.connectit.android.ui.components.AutoSaveNumberField
+import com.connectit.android.ui.components.AutoSaveTextField
+import com.connectit.android.ui.components.ClickRow
+import com.connectit.android.ui.components.GhostButton
+import com.connectit.android.ui.components.SettingsDivider
+import com.connectit.android.ui.components.SettingsGroup
+import com.connectit.android.ui.components.SettingsSubheader
+import com.connectit.android.ui.components.SwitchRow
+import com.connectit.android.ui.components.rememberSavedTicker
 import com.connectit.android.video.VideoServerPlaybackOptions
 import com.connectit.android.video.VideoSort
 import kotlinx.coroutines.launch
 
+/**
+ * 設定頁:分成幾張分組卡片,所有變更都即時自動儲存(沒有「儲存」按鈕),
+ * 數字欄位停止輸入後自動驗證、不合法就顯示原因;很少用到的連線參數收在「進階」裡。
+ */
 @Composable
-fun SettingsScreen(service: ConnectItService, modifier: Modifier = Modifier) {
+fun SettingsScreen(
+    service: ConnectItService,
+    modifier: Modifier = Modifier,
+    onShowOnboarding: () -> Unit = {},
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val settings by service.settingsRepository.settings.collectAsState(
-        initial = AppSettings(service.settingsRepository.defaultDeviceName(), AppThemeMode.AUTO)
+    val repo = service.settingsRepository
+    val settings by repo.settings.collectAsState(
+        initial = AppSettings(repo.defaultDeviceName(), AppThemeMode.AUTO)
     )
     val logMessages by service.logMessages.collectAsState()
 
-    var deviceNameText by remember { mutableStateOf(settings.deviceName) }
-    LaunchedEffect(settings.deviceName) { deviceNameText = settings.deviceName }
-
-    var portText by remember { mutableStateOf(settings.preferredPort.takeIf { it != 0 }?.toString() ?: "") }
-    LaunchedEffect(settings.preferredPort) { portText = settings.preferredPort.takeIf { it != 0 }?.toString() ?: "" }
-
-    var timeoutText by remember { mutableStateOf(settings.connectTimeoutSeconds.toString()) }
-    LaunchedEffect(settings.connectTimeoutSeconds) { timeoutText = settings.connectTimeoutSeconds.toString() }
-
-    var autoplayCountdownText by remember { mutableStateOf(settings.videoAutoplayCountdownSeconds.toString()) }
-    LaunchedEffect(settings.videoAutoplayCountdownSeconds) { autoplayCountdownText = settings.videoAutoplayCountdownSeconds.toString() }
-
-    var extraExtensionsText by remember { mutableStateOf(formatExtraExtensions(settings.videoExtraExtensions)) }
-    LaunchedEffect(settings.videoExtraExtensions) { extraExtensionsText = formatExtraExtensions(settings.videoExtraExtensions) }
+    val deviceSaved = rememberSavedTicker()
+    val receiveSaved = rememberSavedTicker()
+    val videoSaved = rememberSavedTicker()
+    val advancedSaved = rememberSavedTicker()
 
     val folderPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
             context.contentResolver.takePersistableUriPermission(
                 uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
             )
-            scope.launch { service.settingsRepository.setCustomDownloadFolderUri(uri.toString()) }
+            scope.launch {
+                repo.setCustomDownloadFolderUri(uri.toString())
+                receiveSaved.bump()
+            }
         }
     }
 
-    Scaffold(
-        modifier = modifier,
-        topBar = { TopAppBar(title = { Text("設定") }) },
-    ) { padding ->
-        AdaptiveContentWidth(modifier = Modifier.padding(padding)) {
+    AdaptiveContentWidth(modifier = modifier) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(16.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            OutlinedTextField(
-                value = deviceNameText,
-                onValueChange = { deviceNameText = it },
-                label = { Text("裝置名稱") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-            OutlinedButton(onClick = { scope.launch { service.settingsRepository.setDeviceName(deviceNameText) } }) {
-                Text("儲存裝置名稱")
+            Column(Modifier.padding(start = 4.dp, top = 4.dp, bottom = 4.dp)) {
+                Text("設定", style = MaterialTheme.typography.headlineMedium)
+                Text(
+                    "變更會立即自動儲存。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
-            HorizontalDivider()
-
-            Text("外觀主題", style = MaterialTheme.typography.titleMedium)
-            ThemeOption("跟隨系統", AppThemeMode.AUTO, settings.themeMode) {
-                scope.launch { service.settingsRepository.setThemeMode(it) }
+            // ===== 外觀 =====
+            SettingsGroup(title = "外觀", icon = Icons.Filled.Palette) {
+                val options = listOf(
+                    Triple(AppThemeMode.LIGHT, "淺色", Icons.Filled.LightMode),
+                    Triple(AppThemeMode.DARK, "深色", Icons.Filled.DarkMode),
+                    Triple(AppThemeMode.AUTO, "跟隨系統", Icons.Filled.BrightnessAuto),
+                )
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                    options.forEachIndexed { index, (mode, label, icon) ->
+                        SegmentedButton(
+                            selected = settings.themeMode == mode,
+                            onClick = { scope.launch { repo.setThemeMode(mode) } },
+                            shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                            icon = {
+                                SegmentedButtonDefaults.Icon(active = settings.themeMode == mode) {
+                                    Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+                                }
+                            },
+                        ) { Text(label) }
+                    }
+                }
             }
-            ThemeOption("淺色", AppThemeMode.LIGHT, settings.themeMode) {
-                scope.launch { service.settingsRepository.setThemeMode(it) }
-            }
-            ThemeOption("深色", AppThemeMode.DARK, settings.themeMode) {
-                scope.launch { service.settingsRepository.setThemeMode(it) }
-            }
 
-            HorizontalDivider()
-
-            Text("通知", style = MaterialTheme.typography.titleMedium)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            // ===== 這台裝置 =====
+            SettingsGroup(
+                title = "這台裝置",
+                icon = Icons.Filled.PhoneAndroid,
+                description = "其他裝置會用這個名字找到你。",
+                savedTick = deviceSaved.value,
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("傳輸與斷線通知")
+                AutoSaveTextField(
+                    label = "裝置名稱",
+                    initialValue = settings.deviceName,
+                    validate = SettingsValidation::validateDeviceName,
+                    onSave = { name ->
+                        if (name.trim() != settings.deviceName) {
+                            scope.launch {
+                                repo.setDeviceName(name.trim())
+                                deviceSaved.bump()
+                            }
+                        }
+                    },
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+
+            // ===== 檔案接收 =====
+            SettingsGroup(
+                title = "檔案接收",
+                icon = Icons.Filled.FolderOpen,
+                description = "收到的檔案會儲存到這個資料夾。",
+                savedTick = receiveSaved.value,
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                ) {
                     Text(
-                        "建立連線、收到檔案/資料夾、對方斷線時跳出系統通知(連線請求一律會通知,不受此設定影響)。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        service.downloadDisplayPath,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
                     )
                 }
-                Switch(
+                Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    GhostButton(onClick = { folderPickerLauncher.launch(null) }, text = "變更資料夾")
+                    if (settings.customDownloadFolderUri != null) {
+                        TextButton(onClick = {
+                            scope.launch {
+                                repo.setCustomDownloadFolderUri(null)
+                                receiveSaved.bump()
+                            }
+                        }) { Text("還原預設") }
+                    }
+                }
+            }
+
+            // ===== 通知 =====
+            SettingsGroup(title = "通知", icon = Icons.Filled.NotificationsNone) {
+                SwitchRow(
+                    title = "傳輸與斷線通知",
+                    description = "建立連線、收到檔案、對方斷線時跳出系統通知。連線請求一律會通知,不受這個設定影響。",
                     checked = settings.notificationsEnabled,
-                    onCheckedChange = { scope.launch { service.settingsRepository.setNotificationsEnabled(it) } },
+                    onCheckedChange = { scope.launch { repo.setNotificationsEnabled(it) } },
                 )
             }
 
-            HorizontalDivider()
-
-            Text("信任的裝置", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "信任的裝置送出連線請求時會直接自動接受,不再跳出確認對話框。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (settings.trustedDeviceNames.isEmpty()) {
-                Text(
-                    "目前沒有信任的裝置(可在收到連線請求時勾選「信任此裝置」加入)。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            } else {
-                Column {
-                    settings.trustedDeviceNames.sorted().forEach { name ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                        ) {
-                            Text(name)
-                            IconButton(onClick = { scope.launch { service.settingsRepository.untrustDevice(name) } }) {
-                                Icon(Icons.Filled.Close, contentDescription = "移除信任")
+            // ===== 信任的裝置 =====
+            SettingsGroup(
+                title = "信任的裝置",
+                icon = Icons.Filled.VerifiedUser,
+                description = "信任的裝置送出連線請求時會自動接受,不再跳出確認視窗。",
+            ) {
+                if (settings.trustedDeviceNames.isEmpty()) {
+                    Text(
+                        "目前沒有信任的裝置。收到連線請求時勾選「信任此裝置」即可加入。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 10.dp),
+                    )
+                } else {
+                    Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        settings.trustedDeviceNames.sorted().forEach { name ->
+                            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(start = 14.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(Icons.Filled.Devices, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(name, modifier = Modifier.weight(1f))
+                                    IconButton(onClick = { scope.launch { repo.untrustDevice(name) } }) {
+                                        Icon(Icons.Filled.Close, contentDescription = "取消信任")
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
 
-            HorizontalDivider()
-
-            Text("接收檔案儲存位置", style = MaterialTheme.typography.titleMedium)
-            Text(service.downloadDisplayPath, style = MaterialTheme.typography.bodySmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { folderPickerLauncher.launch(null) }) {
-                    Text("選擇資料夾")
-                }
-                if (settings.customDownloadFolderUri != null) {
-                    TextButton(onClick = { scope.launch { service.settingsRepository.setCustomDownloadFolderUri(null) } }) {
-                        Text("還原預設")
-                    }
-                }
-            }
-
-            HorizontalDivider()
-
-            Text("連線設定", style = MaterialTheme.typography.titleMedium)
-            OutlinedTextField(
-                value = portText,
-                onValueChange = { text -> if (text.all { it.isDigit() } && text.length <= 5) portText = text },
-                label = { Text("監聽連接埠(留空 = 自動)") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-            OutlinedTextField(
-                value = timeoutText,
-                onValueChange = { text -> if (text.all { it.isDigit() } && text.length <= 3) timeoutText = text },
-                label = { Text("連線逾時秒數") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-            OutlinedButton(onClick = {
-                scope.launch {
-                    service.settingsRepository.setPreferredPort(portText.toIntOrNull() ?: 0)
-                    service.settingsRepository.setConnectTimeoutSeconds(
-                        timeoutText.toIntOrNull() ?: AppSettings.DEFAULT_CONNECT_TIMEOUT_SECONDS
-                    )
-                }
-            }) {
-                Text("儲存連線設定")
-            }
-            Text(
-                "連接埠變更需要重新啟動 App 才會生效。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            HorizontalDivider()
-
-            Text("影片伺服器", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "下次開始分享影片時套用的預設值:清單排序方式、播放器初始行為,以及掃描資料夾時額外要當作影片的副檔名。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            var sortMenuExpanded by remember { mutableStateOf(false) }
-            Box {
-                OutlinedButton(onClick = { sortMenuExpanded = true }) {
-                    Text("預設排序方式:${VideoSort.entries.first { it.value == settings.videoDefaultSort }.label}")
-                }
-                DropdownMenu(expanded = sortMenuExpanded, onDismissRequest = { sortMenuExpanded = false }) {
-                    VideoSort.entries.forEach { option ->
-                        DropdownMenuItem(
-                            text = { Text(option.label) },
-                            onClick = {
-                                sortMenuExpanded = false
-                                scope.launch { service.settingsRepository.setVideoDefaultSort(option.value) }
-                            },
-                        )
-                    }
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            // ===== 影片分享預設值 =====
+            SettingsGroup(
+                title = "影片分享預設值",
+                icon = Icons.Filled.MovieFilter,
+                description = "下次開始分享影片時,觀看頁一開始的排序與播放行為。",
+                savedTick = videoSaved.value,
             ) {
-                Text("預設自動播放下一部")
-                Switch(
+                var sortMenuExpanded by remember { mutableStateOf(false) }
+                Box {
+                    ClickRow(
+                        title = "排序方式",
+                        value = VideoSort.entries.firstOrNull { it.value == settings.videoDefaultSort }?.label,
+                        onClick = { sortMenuExpanded = true },
+                    )
+                    DropdownMenu(expanded = sortMenuExpanded, onDismissRequest = { sortMenuExpanded = false }) {
+                        VideoSort.entries.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option.label) },
+                                leadingIcon = if (option.value == settings.videoDefaultSort) {
+                                    { Icon(Icons.Filled.Check, contentDescription = null) }
+                                } else {
+                                    null
+                                },
+                                onClick = {
+                                    sortMenuExpanded = false
+                                    scope.launch {
+                                        repo.setVideoDefaultSort(option.value)
+                                        videoSaved.bump()
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+                SettingsDivider()
+                SwitchRow(
+                    title = "自動播放下一部",
                     checked = settings.videoAutoplayNext,
-                    onCheckedChange = { scope.launch { service.settingsRepository.setVideoAutoplayNext(it) } },
+                    onCheckedChange = { scope.launch { repo.setVideoAutoplayNext(it); videoSaved.bump() } },
                 )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-            ) {
-                Text("預設隨機播放")
-                Switch(
+                SwitchRow(
+                    title = "隨機播放",
                     checked = settings.videoShuffle,
-                    onCheckedChange = { scope.launch { service.settingsRepository.setVideoShuffle(it) } },
+                    onCheckedChange = { scope.launch { repo.setVideoShuffle(it); videoSaved.bump() } },
                 )
-            }
+                SettingsDivider()
+                AutoSaveNumberField(
+                    label = "自動播放前的倒數秒數",
+                    initialValue = settings.videoAutoplayCountdownSeconds.toString(),
+                    validate = SettingsValidation::validateAutoplayCountdown,
+                    onSave = { seconds ->
+                        if (seconds != settings.videoAutoplayCountdownSeconds) {
+                            scope.launch { repo.setVideoAutoplayCountdownSeconds(seconds); videoSaved.bump() }
+                        }
+                    },
+                    supportingText = "1–30 秒",
+                    modifier = Modifier.padding(top = 10.dp),
+                )
 
-            OutlinedTextField(
-                value = autoplayCountdownText,
-                onValueChange = { text -> if (text.all { it.isDigit() } && text.length <= 2) autoplayCountdownText = text },
-                label = { Text("自動播放倒數秒數(1-30)") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-            OutlinedButton(onClick = {
-                scope.launch {
-                    service.settingsRepository.setVideoAutoplayCountdownSeconds(
-                        autoplayCountdownText.toIntOrNull() ?: VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS,
+                // 拖曳中只更新畫面上的數字,放開才寫入,不用每一格都存一次。
+                var volumeDraft by remember { mutableFloatStateOf(settings.videoDefaultVolumePercent.toFloat()) }
+                LaunchedEffect(settings.videoDefaultVolumePercent) { volumeDraft = settings.videoDefaultVolumePercent.toFloat() }
+                SettingsSubheader("預設音量:${volumeDraft.toInt()}%")
+                Slider(
+                    value = volumeDraft,
+                    onValueChange = { volumeDraft = it },
+                    onValueChangeFinished = {
+                        scope.launch { repo.setVideoDefaultVolumePercent(volumeDraft.toInt()); videoSaved.bump() }
+                    },
+                    valueRange = 0f..100f,
+                )
+
+                var speedMenuExpanded by remember { mutableStateOf(false) }
+                Box {
+                    ClickRow(
+                        title = "預設播放速度",
+                        value = formatSpeedLabel(settings.videoDefaultSpeed),
+                        onClick = { speedMenuExpanded = true },
                     )
+                    DropdownMenu(expanded = speedMenuExpanded, onDismissRequest = { speedMenuExpanded = false }) {
+                        VideoServerPlaybackOptions.VALID_PLAYBACK_SPEEDS.forEach { speedOption ->
+                            DropdownMenuItem(
+                                text = { Text(formatSpeedLabel(speedOption)) },
+                                leadingIcon = if (speedOption == settings.videoDefaultSpeed) {
+                                    { Icon(Icons.Filled.Check, contentDescription = null) }
+                                } else {
+                                    null
+                                },
+                                onClick = {
+                                    speedMenuExpanded = false
+                                    scope.launch { repo.setVideoDefaultSpeed(speedOption); videoSaved.bump() }
+                                },
+                            )
+                        }
+                    }
                 }
-            }) {
-                Text("儲存倒數秒數")
             }
 
-            Text("預設音量:${settings.videoDefaultVolumePercent}%", style = MaterialTheme.typography.bodySmall)
-            Slider(
-                value = settings.videoDefaultVolumePercent.toFloat(),
-                onValueChange = { value -> scope.launch { service.settingsRepository.setVideoDefaultVolumePercent(value.toInt()) } },
-                valueRange = 0f..100f,
-                steps = 99,
-            )
-
-            var speedMenuExpanded by remember { mutableStateOf(false) }
-            Box {
-                OutlinedButton(onClick = { speedMenuExpanded = true }) {
-                    Text("預設播放速度:${formatSpeedLabel(settings.videoDefaultSpeed)}")
-                }
-                DropdownMenu(expanded = speedMenuExpanded, onDismissRequest = { speedMenuExpanded = false }) {
-                    VideoServerPlaybackOptions.VALID_PLAYBACK_SPEEDS.forEach { speedOption ->
-                        DropdownMenuItem(
-                            text = { Text(formatSpeedLabel(speedOption)) },
-                            onClick = {
-                                speedMenuExpanded = false
-                                scope.launch { service.settingsRepository.setVideoDefaultSpeed(speedOption) }
+            // ===== 進階 =====
+            var advancedExpanded by rememberSaveable { mutableStateOf(false) }
+            SettingsGroup(
+                title = "進階",
+                icon = Icons.Filled.Tune,
+                description = "一般情況不需要調整。遇到防火牆只開放特定連接埠、或網路比較慢時再來這裡設定。",
+                savedTick = advancedSaved.value,
+            ) {
+                ClickRow(
+                    title = if (advancedExpanded) "隱藏進階設定" else "顯示進階設定",
+                    onClick = { advancedExpanded = !advancedExpanded },
+                    showChevron = false,
+                    trailing = {
+                        Icon(
+                            if (advancedExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                            contentDescription = null,
+                        )
+                    },
+                )
+                AnimatedVisibility(visible = advancedExpanded) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 8.dp)) {
+                        AutoSaveNumberField(
+                            label = "監聽連接埠",
+                            initialValue = settings.preferredPort.takeIf { it != 0 }?.toString() ?: "",
+                            validate = SettingsValidation::validatePort,
+                            onSave = { port ->
+                                if (port != settings.preferredPort) {
+                                    scope.launch { repo.setPreferredPort(port); advancedSaved.bump() }
+                                }
                             },
+                            placeholder = "自動指派",
+                            supportingText = "留空由系統自動指派。變更後要重新啟動 App 才會生效。",
+                        )
+                        AutoSaveNumberField(
+                            label = "連線逾時秒數",
+                            initialValue = settings.connectTimeoutSeconds.toString(),
+                            validate = SettingsValidation::validateConnectTimeout,
+                            onSave = { seconds ->
+                                if (seconds != settings.connectTimeoutSeconds) {
+                                    scope.launch { repo.setConnectTimeoutSeconds(seconds); advancedSaved.bump() }
+                                }
+                            },
+                            supportingText = "主動連線時,等待對方網路回應的最長時間(3–120 秒)。",
+                        )
+                        AutoSaveTextField(
+                            label = "額外當作影片的副檔名",
+                            initialValue = formatExtraExtensions(settings.videoExtraExtensions),
+                            onSave = { text ->
+                                scope.launch { repo.setVideoExtraExtensions(text); advancedSaved.bump() }
+                            },
+                            placeholder = "例如 .ogv, .3gp",
+                            supportingText = "以逗號分隔;分享影片資料夾時,這些副檔名的檔案也會列入。",
                         )
                     }
                 }
             }
 
-            OutlinedTextField(
-                value = extraExtensionsText,
-                onValueChange = { extraExtensionsText = it },
-                label = { Text("額外支援的副檔名") },
-                placeholder = { Text("以逗號分隔,例如 .ogv, .3gp") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-            OutlinedButton(onClick = {
-                scope.launch {
-                    val applied = service.settingsRepository.setVideoExtraExtensions(extraExtensionsText)
-                    extraExtensionsText = formatExtraExtensions(applied)
-                }
-            }) {
-                Text("儲存額外副檔名")
-            }
-
-            HorizontalDivider()
-
-            Text("近期紀錄", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth().height(200.dp)) {
-                LazyColumn(modifier = Modifier.padding(8.dp)) {
-                    items(logMessages.takeLast(50).asReversed()) { line ->
-                        Text(line, style = MaterialTheme.typography.bodySmall)
+            // ===== 說明與診斷 =====
+            var logExpanded by rememberSaveable { mutableStateOf(false) }
+            SettingsGroup(title = "說明與診斷", icon = Icons.AutoMirrored.Filled.HelpOutline) {
+                ClickRow(
+                    title = "重新顯示使用引導",
+                    value = "再看一次怎麼配對、傳檔與分享影片。",
+                    onClick = onShowOnboarding,
+                    trailing = { Icon(Icons.Filled.WavingHand, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                    showChevron = false,
+                )
+                SettingsDivider()
+                ClickRow(
+                    title = "狀態紀錄",
+                    value = "連不上其他裝置時,這裡的紀錄可以幫忙找出原因。",
+                    onClick = { logExpanded = !logExpanded },
+                    showChevron = false,
+                    trailing = { Icon(if (logExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, contentDescription = null) },
+                )
+                AnimatedVisibility(visible = logExpanded) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    ) {
+                        Column(
+                            Modifier
+                                .heightIn(max = 220.dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(12.dp),
+                        ) {
+                            if (logMessages.isEmpty()) {
+                                Text("(還沒有紀錄)", style = MaterialTheme.typography.bodySmall)
+                            }
+                            logMessages.takeLast(50).asReversed().forEach { line ->
+                                Text(line, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                            }
+                        }
                     }
                 }
+                SettingsDivider()
+                ClickRow(
+                    title = "停止背景服務並結束",
+                    value = "關閉後其他裝置就找不到這台,直到下次開啟 App。",
+                    onClick = {
+                        context.stopService(Intent(context, ConnectItService::class.java))
+                        (context as? Activity)?.finishAndRemoveTask()
+                    },
+                    showChevron = false,
+                    trailing = { Icon(Icons.Filled.PowerSettingsNew, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                )
             }
-
-            HorizontalDivider()
-
-            OutlinedButton(onClick = {
-                context.stopService(Intent(context, com.connectit.android.service.ConnectItService::class.java))
-                (context as? Activity)?.finishAndRemoveTask()
-            }) {
-                Text("停止背景服務並結束")
-            }
-        }
         }
     }
 }
@@ -364,14 +475,3 @@ private fun formatSpeedLabel(value: Double): String {
 }
 
 private fun formatExtraExtensions(extensions: List<String>): String = extensions.joinToString(", ") { ".$it" }
-
-@Composable
-private fun ThemeOption(label: String, value: AppThemeMode, selected: AppThemeMode, onSelect: (AppThemeMode) -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-    ) {
-        RadioButton(selected = selected == value, onClick = { onSelect(value) })
-        Text(label)
-    }
-}

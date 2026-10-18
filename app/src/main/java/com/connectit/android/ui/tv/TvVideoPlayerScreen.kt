@@ -76,6 +76,8 @@ import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.net.observeControlState
 import com.connectit.android.net.videoMediaUrl
 import com.connectit.android.repo.PlaybackPreferences
+import com.connectit.android.repo.RecentlyWatchedStore
+import com.connectit.android.ui.theme.BrandColors
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -102,9 +104,13 @@ fun TvVideoPlayerScreen(
     onBack: () -> Unit,
     onExitRemoteControl: () -> Unit,
     remoteControlHint: Boolean = false,
+    /** 從「繼續觀看」進來時,第一部影片的起始位置(見手機版 VideoPlayerScreen 的同名參數)。 */
+    startPositionMs: Long? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val recentlyWatched = remember { RecentlyWatchedStore.get(context) }
+    var pendingStartPositionMs by remember { mutableStateOf(startPositionMs) }
     val prefs = remember { PlaybackPreferences(context.applicationContext) }
     val exoPlayer = remember { ExoPlayer.Builder(context).build() }
     val rootFocusRequester = remember { FocusRequester() }
@@ -162,8 +168,10 @@ fun TvVideoPlayerScreen(
         exoPlayer.prepare()
         exoPlayer.playWhenReady = true
         if (!remoteEnabled) {
+            val resumeAt = pendingStartPositionMs
+            pendingStartPositionMs = null
             scope.launch {
-                val saved = prefs.getPosition(videoKey(entry))
+                val saved = resumeAt ?: prefs.getPosition(videoKey(entry))
                 if (saved != null && saved > 5_000L) exoPlayer.seekTo(saved)
             }
         }
@@ -219,6 +227,7 @@ fun TvVideoPlayerScreen(
                 if (state == Player.STATE_ENDED) {
                     val finished = entries.getOrNull(currentIndex) ?: return
                     scope.launch { prefs.clearPosition(videoKey(finished)) }
+                    recentlyWatched.remove(server.displayName, finished.relativePath)
                     val nextIndex = currentIndex + 1
                     // 遠端控制中由主機決定要不要/切到哪一部,觀看端不自己倒數跳下一部。
                     if (autoplayNext && !remoteEnabled && nextIndex in entries.indices) startAutoplayCountdown(nextIndex)
@@ -234,6 +243,12 @@ fun TvVideoPlayerScreen(
             delay(3_000)
             val entry = entries.getOrNull(currentIndex) ?: continue
             if (exoPlayer.currentPosition > 2_000L) prefs.savePosition(videoKey(entry), exoPlayer.currentPosition)
+            if (!remoteEnabled && exoPlayer.isPlaying) {
+                recentlyWatched.record(
+                    server.displayName, entry.relativePath, entry.name,
+                    exoPlayer.currentPosition, exoPlayer.duration.coerceAtLeast(0L),
+                )
+            }
         }
     }
 
@@ -501,7 +516,7 @@ private fun TvSeekBar(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
-    val fraction = fractionOf(positionMs, durationMs)
+    val fraction = tvFractionOf(positionMs, durationMs)
 
     Box(
         modifier = modifier
@@ -528,13 +543,10 @@ private fun TvSeekBar(
                 .fillMaxHeight()
                 .fillMaxWidth(fraction)
                 .clip(RoundedCornerShape(50))
-                .background(MaterialTheme.colorScheme.primary),
+                .background(BrandColors.GradientHorizontal),
         )
     }
 }
-
-private fun fractionOf(position: Long, duration: Long): Float =
-    if (duration > 0) (position.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f
 
 private fun formatDuration(ms: Long): String {
     if (ms <= 0) return "0:00"

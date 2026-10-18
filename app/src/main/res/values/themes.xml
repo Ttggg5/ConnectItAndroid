@@ -1,3 +1,7 @@
 <resources>
-    <style name="Theme.ConnectIt" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- 啟動時(Compose 畫面還沒畫出來之前)的視窗底色用品牌深色背景,不會先閃一下白色;
+         實際的淺色/深色主題由 Compose 的 ConnectItTheme 依設定套用。 -->
+    <style name="Theme.ConnectIt" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/brand_background_dark</item>
+    </style>
 </resources>

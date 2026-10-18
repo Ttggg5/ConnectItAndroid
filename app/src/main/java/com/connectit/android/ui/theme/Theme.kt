@@ -3,23 +3,16 @@ package com.connectit.android.ui.theme
 import android.app.Activity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import com.connectit.android.repo.AppThemeMode
 
-private val LightColors = lightColorScheme(
-    primary = androidx.compose.ui.graphics.Color(0xFF6D83A6),
-    secondary = androidx.compose.ui.graphics.Color(0xFF889CBA),
-)
-
-private val DarkColors = darkColorScheme(
-    primary = androidx.compose.ui.graphics.Color(0xFFBDC7D7),
-    secondary = androidx.compose.ui.graphics.Color(0xFFC9D2E0),
-)
+/** 目前實際套用的是不是深色主題(AUTO 時依系統),給 Hero 漸層這類主題相依、又不在 ColorScheme 裡的品牌元素用。 */
+val LocalIsDarkTheme = staticCompositionLocalOf { true }
 
 @Composable
 fun ConnectItTheme(themeMode: AppThemeMode, content: @Composable () -> Unit) {
@@ -30,7 +23,7 @@ fun ConnectItTheme(themeMode: AppThemeMode, content: @Composable () -> Unit) {
     }
 
     // 品牌色要跟 Windows 版一致,所以不用 Material You 動態色彩(會跟著裝置桌布跑掉),
-    // 固定套用 LightColors/DarkColors。
+    // 固定套用 Aurora 色票(見 Color.kt)。
     val colorScheme = if (useDark) DarkColors else LightColors
 
     val view = LocalView.current
@@ -45,5 +38,12 @@ fun ConnectItTheme(themeMode: AppThemeMode, content: @Composable () -> Unit) {
         }
     }
 
-    MaterialTheme(colorScheme = colorScheme, content = content)
+    CompositionLocalProvider(LocalIsDarkTheme provides useDark) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = BrandTypography,
+            shapes = BrandShapes,
+            content = content,
+        )
+    }
 }

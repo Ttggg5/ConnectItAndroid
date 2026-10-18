@@ -6,15 +6,51 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.darkColorScheme
 import androidx.tv.material3.lightColorScheme
 import com.connectit.android.repo.AppThemeMode
+import com.connectit.android.ui.theme.BrandColors
 
+/** TV 版也用同一組「Aurora」品牌色票(見 ui/theme/Color.kt),跟手機版、Windows 版長得一樣。 */
 private val TvLightColors = lightColorScheme(
-    primary = Color(0xFF6D83A6),
-    secondary = Color(0xFF889CBA),
+    primary = BrandColors.IndigoDeep,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFE6E7FD),
+    onPrimaryContainer = Color(0xFF1E1B6B),
+    secondary = BrandColors.CyanDeep,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFDDF6FB),
+    onSecondaryContainer = Color(0xFF053B47),
+    background = BrandColors.LightBackground,
+    onBackground = BrandColors.LightText,
+    surface = BrandColors.LightSurface,
+    onSurface = BrandColors.LightText,
+    surfaceVariant = BrandColors.LightSurfaceVariant,
+    onSurfaceVariant = BrandColors.LightTextMuted,
+    border = Color(0xFFC3CADD),
+    borderVariant = BrandColors.LightOutline,
+    error = Color(0xFFDC2626),
+    onError = Color.White,
 )
 
 private val TvDarkColors = darkColorScheme(
-    primary = Color(0xFFBDC7D7),
-    secondary = Color(0xFFC9D2E0),
+    primary = BrandColors.IndigoLight,
+    onPrimary = Color(0xFF14123F),
+    primaryContainer = Color(0xFF26284F),
+    onPrimaryContainer = Color(0xFFDCDDFF),
+    secondary = BrandColors.Cyan,
+    onSecondary = Color(0xFF032A33),
+    secondaryContainer = Color(0xFF12323F),
+    onSecondaryContainer = Color(0xFFBDF3FC),
+    background = BrandColors.DarkBackground,
+    onBackground = BrandColors.DarkText,
+    surface = BrandColors.DarkSurface,
+    onSurface = BrandColors.DarkText,
+    surfaceVariant = BrandColors.DarkSurfaceVariant,
+    onSurfaceVariant = BrandColors.DarkTextMuted,
+    inverseSurface = BrandColors.DarkText,
+    inverseOnSurface = BrandColors.DarkBackground,
+    border = Color(0xFF3A4668),
+    borderVariant = BrandColors.DarkOutline,
+    error = Color(0xFFF87171),
+    onError = Color(0xFF450A0A),
 )
 
 /** TV 版用 androidx.tv.material3(跟手機版的 androidx.compose.material3 是兩套獨立元件庫,

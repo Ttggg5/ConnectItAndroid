@@ -1,3 +1,7 @@
 <resources>
-    <color name="ic_launcher_background">#6D83A6</color>
+    <!-- Aurora 品牌色票(見 ui/theme/Color.kt)。 -->
+    <color name="brand_indigo">#6366F1</color>
+    <color name="brand_cyan">#22D3EE</color>
+    <color name="brand_background_dark">#0B1020</color>
+    <color name="ic_launcher_background">#6366F1</color>
 </resources>

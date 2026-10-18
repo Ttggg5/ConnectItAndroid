@@ -5,17 +5,25 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.DriveFolderUpload
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.LinkOff
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -25,16 +33,22 @@ import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.OutlinedButton
 import androidx.tv.material3.Surface
+import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import com.connectit.android.model.ConnectedPeer
 import com.connectit.android.service.ConnectItService
+import com.connectit.android.ui.components.GradientAvatar
+import com.connectit.android.ui.components.GradientProgressBar
+import com.connectit.android.ui.theme.BrandColors
 import com.connectit.android.util.SafUtils
 
+/** TV 版「目前連線」面板:連線對象、傳送檔案/資料夾、傳輸進度、這次連線的傳輸紀錄、中斷連線。 */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-fun TvConnectedScreen(service: ConnectItService, peer: ConnectedPeer) {
+fun TvConnectionPanel(service: ConnectItService, peer: ConnectedPeer) {
     val context = LocalContext.current
     val transferState by service.transferState.collectAsState()
+    val history by service.transferHistory.collectAsState()
 
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
@@ -51,38 +65,74 @@ fun TvConnectedScreen(service: ConnectItService, peer: ConnectedPeer) {
         service.sendFolder(SafUtils.displayNameOf(context, treeUri), entries)
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = SurfaceDefaults.colors(containerColor = MaterialTheme.colorScheme.surface),
     ) {
-        Text("已連線裝置:${peer.name}(${peer.address})", style = MaterialTheme.typography.headlineSmall)
-
-        val transferActive = service.isFileTransferActive
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = { pickFiles.launch(arrayOf("*/*")) }, enabled = !transferActive) {
-                Icon(Icons.Filled.InsertDriveFile, contentDescription = null)
-                Text(" 傳送檔案")
+        Column(Modifier.padding(28.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                GradientAvatar(icon = Icons.Filled.Devices, size = 56.dp)
+                Spacer(Modifier.width(18.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("目前連線", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(peer.name, style = MaterialTheme.typography.headlineSmall)
+                    Text(peer.address, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = BrandColors.Success)
+                Spacer(Modifier.width(8.dp))
+                Text("已連線", style = MaterialTheme.typography.titleMedium, color = BrandColors.Success)
             }
-            Button(onClick = { pickFolder.launch(null) }, enabled = !transferActive) {
-                Icon(Icons.Filled.Folder, contentDescription = null)
-                Text(" 傳送資料夾")
-            }
-        }
 
-        transferState?.let { state ->
-            Surface(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(state.title, style = MaterialTheme.typography.titleMedium)
-                    LinearProgressIndicator(progress = { state.progress }, modifier = Modifier.fillMaxWidth())
-                    Text(state.statusText)
-                    OutlinedButton(onClick = { service.cancelTransfer() }) { Text("取消") }
+            val transferActive = transferState != null
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Button(onClick = { pickFiles.launch(arrayOf("*/*")) }, enabled = !transferActive) {
+                    Icon(Icons.Filled.UploadFile, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("傳送檔案")
+                }
+                Button(onClick = { pickFolder.launch(null) }, enabled = !transferActive) {
+                    Icon(Icons.Filled.DriveFolderUpload, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("傳送資料夾")
+                }
+                Spacer(Modifier.weight(1f))
+                OutlinedButton(onClick = { service.disconnectFromPeer() }) {
+                    Icon(Icons.Filled.LinkOff, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("中斷連線")
                 }
             }
-        }
 
-        OutlinedButton(onClick = { service.disconnectFromPeer() }) {
-            Icon(Icons.Filled.LinkOff, contentDescription = null)
-            Text(" 中斷連線")
+            transferState?.let { state ->
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(state.title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        OutlinedButton(onClick = { service.cancelTransfer() }) { Text("取消") }
+                    }
+                    GradientProgressBar(progress = state.progress, height = 10.dp)
+                    Text(state.statusText, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+
+            if (history.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("這次連線的傳輸紀錄", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    history.take(5).forEach { record ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            val (icon, tint) = when {
+                                !record.succeeded -> Icons.Filled.ErrorOutline to BrandColors.Warning
+                                record.isReceived -> Icons.Filled.ArrowDownward to MaterialTheme.colorScheme.secondary
+                                else -> Icons.Filled.ArrowUpward to MaterialTheme.colorScheme.primary
+                            }
+                            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(10.dp))
+                            Text(record.name, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f), maxLines = 1)
+                            Text(record.statusText, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
         }
     }
 }

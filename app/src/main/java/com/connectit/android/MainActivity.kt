@@ -1,6 +1,8 @@
 package com.connectit.android
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -44,8 +46,16 @@ class MainActivity : ComponentActivity() {
         // 只會套用預設的淺色底色,在深色主題下會變成一條突兀的白條。
         enableEdgeToEdge()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val isTv = isTelevision(this)
+
+        // 手機/平板版改在首次啟動引導的最後一步(或引導完成後的下次開啟)才詢問通知權限,
+        // 見 ConnectItApp;電視沒有引導流程,維持一開啟就詢問。
+        if (isTv && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        if (savedInstanceState == null) {
+            handleShareIntent(intent)
         }
 
         // API 29 以上改用 MediaStore.Downloads 寫入公用 Download 資料夾,不需要這個權限;
@@ -55,7 +65,6 @@ class MainActivity : ComponentActivity() {
         }
 
         val settingsRepository = SettingsRepository(applicationContext)
-        val isTv = isTelevision(this)
 
         setContent {
             val settings by settingsRepository.settings.collectAsState(
@@ -97,13 +106,46 @@ class MainActivity : ComponentActivity() {
                             LaunchedEffect(current) {
                                 current.exitRequested.collect { finishAndRemoveTask() }
                             }
-                            ConnectItApp(service = current)
+                            ConnectItApp(service = current, viewModel = viewModel)
                         }
                     }
                 }
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleShareIntent(intent)
+    }
+
+    /** 從其他 App 按「分享」→ ConnectIt 進來時,把分享的檔案交給畫面讓使用者選擇要傳給哪台裝置。 */
+    private fun handleShareIntent(intent: Intent?) {
+        val uris: List<Uri> = when (intent?.action) {
+            Intent.ACTION_SEND -> listOfNotNull(intent.streamExtra())
+            Intent.ACTION_SEND_MULTIPLE -> intent.streamListExtra()
+            else -> emptyList()
+        }
+        if (uris.isNotEmpty()) {
+            viewModel.setPendingShare(uris)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun Intent.streamExtra(): Uri? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            getParcelableExtra(Intent.EXTRA_STREAM)
+        }
+
+    @Suppress("DEPRECATION")
+    private fun Intent.streamListExtra(): List<Uri> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+        } else {
+            getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
+        }
 
     override fun onStart() {
         super.onStart()

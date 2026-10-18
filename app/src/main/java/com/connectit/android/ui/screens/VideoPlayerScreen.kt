@@ -45,7 +45,8 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
-import androidx.compose.material3.Card
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -72,7 +73,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -84,7 +86,6 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
-import coil.compose.AsyncImage
 import com.connectit.android.R
 import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
@@ -92,7 +93,15 @@ import com.connectit.android.net.observeControlState
 import com.connectit.android.net.videoMediaUrl
 import com.connectit.android.net.videoThumbnailUrl
 import com.connectit.android.repo.PlaybackPreferences
+import com.connectit.android.repo.RecentlyWatchedStore
 import com.connectit.android.ui.components.AdaptiveNavigationBreakpoint
+import com.connectit.android.ui.components.GradientPlayButton
+import com.connectit.android.ui.components.NowPlayingBadge
+import com.connectit.android.ui.components.VideoThumbnail
+import com.connectit.android.ui.components.formatBytes
+import com.connectit.android.ui.components.formatDuration
+import com.connectit.android.ui.components.fractionOf
+import com.connectit.android.ui.theme.BrandColors
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -126,8 +135,12 @@ fun VideoPlayerScreen(
     /** 進入畫面前(來自 manifest)對「主機是否開了遠端控制模式」的初步提示,只用來避免掛載瞬間
      * 先閃一下自由控制列——真正即時、會持續更新的判斷來自下面訂閱的主機推送([observeControlState])。 */
     remoteControlHint: Boolean = false,
+    /** 從「繼續觀看」進來時,第一部影片要從這個位置開始播(而不是用以 host:port 為鍵記住的進度,
+     * 對方重新開啟分享後連接埠通常會變,那份記錄就對不上了)。 */
+    startPositionMs: Long? = null,
 ) {
     val context = LocalContext.current
+    val recentlyWatched = remember { RecentlyWatchedStore.get(context) }
     val activity = remember(context) { context.findActivity() }
     val scope = rememberCoroutineScope()
     val prefs = remember { PlaybackPreferences(context.applicationContext) }
@@ -185,6 +198,8 @@ fun VideoPlayerScreen(
         countdownSeconds = null
     }
 
+    var pendingStartPositionMs by remember { mutableStateOf(startPositionMs) }
+
     fun playIndex(index: Int) {
         if (index !in entries.indices) return
         cancelCountdown()
@@ -200,8 +215,10 @@ fun VideoPlayerScreen(
         // 遠端控制模式下,播放位置由主機的狀態決定(見輪詢迴圈),不要用這個使用者自己
         // 上次留下的記錄蓋掉它。
         if (!remoteEnabled) {
+            val resumeAt = pendingStartPositionMs
+            pendingStartPositionMs = null
             scope.launch {
-                val saved = prefs.getPosition(videoKey(entry))
+                val saved = resumeAt ?: prefs.getPosition(videoKey(entry))
                 if (saved != null && saved > 5_000L) {
                     exoPlayer.seekTo(saved)
                 }
@@ -300,6 +317,7 @@ fun VideoPlayerScreen(
                 if (state == Player.STATE_ENDED) {
                     val finished = entries.getOrNull(currentIndex) ?: return
                     scope.launch { prefs.clearPosition(videoKey(finished)) }
+                    recentlyWatched.remove(server.displayName, finished.relativePath)
                     val position = playOrder.indexOf(currentIndex)
                     val nextIndex = playOrder.getOrNull(position + 1)
                     // 遠端控制中由主機決定要不要/切到哪一部,觀看端不自己倒數跳下一部。
@@ -320,6 +338,13 @@ fun VideoPlayerScreen(
             val entry = entries.getOrNull(currentIndex) ?: continue
             if (exoPlayer.currentPosition > 2_000L) {
                 prefs.savePosition(videoKey(entry), exoPlayer.currentPosition)
+            }
+            // 遙控模式下是主機在決定播什麼,不算使用者自己「看到哪裡」。
+            if (!remoteEnabled && exoPlayer.isPlaying) {
+                recentlyWatched.record(
+                    server.displayName, entry.relativePath, entry.name,
+                    exoPlayer.currentPosition, exoPlayer.duration.coerceAtLeast(0L),
+                )
             }
         }
     }
@@ -466,18 +491,22 @@ fun VideoPlayerScreen(
                         )
 
                         countdownSeconds?.let { seconds ->
-                            Card(
+                            Surface(
                                 // 控制列現在疊在影片底部,倒數卡片要多留一點底部空間才不會被蓋住
                                 // (跟網頁版把 .next-overlay 往上挪、避開疊加控制列的道理一樣)。
                                 modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, top = 16.dp, bottom = 96.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                color = Color.Black.copy(alpha = 0.7f),
+                                contentColor = Color.White,
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                    modifier = Modifier.padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
+                                    Icon(Icons.Filled.SkipNext, contentDescription = null, tint = BrandColors.Cyan)
                                     Text("即將播放下一部…($seconds)")
-                                    TextButton(onClick = { cancelCountdown() }) { Text("取消") }
+                                    TextButton(onClick = { cancelCountdown() }) { Text("取消", color = BrandColors.Cyan) }
                                 }
                             }
                         }
@@ -548,11 +577,14 @@ fun VideoPlayerScreen(
 
                     if (!isFullscreen) {
                         currentEntry?.let {
-                            Text(
-                                it.name,
-                                style = MaterialTheme.typography.titleMedium,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                            )
+                            Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                                Text(it.name, style = MaterialTheme.typography.titleLarge)
+                                Text(
+                                    "${server.displayName}・${formatBytes(it.size)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 }
@@ -641,6 +673,11 @@ private fun VideoControls(
                 value = if (isSeeking) seekPreviewFraction else fractionOf(positionMs, durationMs),
                 onValueChange = onSeekChange,
                 onValueChangeFinished = onSeekFinished,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = BrandColors.Cyan,
+                    inactiveTrackColor = Color.White.copy(alpha = 0.3f),
+                ),
             )
 
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -650,9 +687,13 @@ private fun VideoControls(
                 IconButton(onClick = onRewind) {
                     Icon(Icons.Filled.FastRewind, contentDescription = "倒退 10 秒")
                 }
-                IconButton(onClick = onPlayPause) {
-                    Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = "播放/暫停")
-                }
+                GradientPlayButton(
+                    icon = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = "播放/暫停",
+                    onClick = onPlayPause,
+                    size = 44.dp,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
                 IconButton(onClick = onForward) {
                     Icon(Icons.Filled.FastForward, contentDescription = "快轉 10 秒")
                 }
@@ -756,7 +797,7 @@ private fun VideoSidebar(
     modifier: Modifier = Modifier,
 ) {
     LazyColumn(
-        modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+        modifier = modifier.background(MaterialTheme.colorScheme.surfaceContainerLow),
         contentPadding = PaddingValues(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -847,58 +888,34 @@ private fun VideoListRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (isCurrent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (isCurrent) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
             .clickable(enabled = !isCurrent, onClick = onClick)
             .padding(6.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(modifier = Modifier.width(110.dp).aspectRatio(16f / 9f)) {
-            AsyncImage(
-                model = videoThumbnailUrl(server.host, server.port, entry.relativePath),
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(6.dp)),
-                contentScale = ContentScale.Crop,
+        Box(modifier = Modifier.width(120.dp)) {
+            VideoThumbnail(
+                url = videoThumbnailUrl(server.host, server.port, entry.relativePath),
+                modifier = Modifier.fillMaxWidth(),
+                cornerRadius = 10.dp,
             )
-        }
-        Column {
-            Text(entry.name, style = MaterialTheme.typography.bodyMedium, maxLines = 2)
-            Text(formatBytes(entry.size), style = MaterialTheme.typography.bodySmall)
             if (isCurrent) {
-                Text(
-                    "正在播放",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                NowPlayingBadge(Modifier.align(Alignment.TopStart).padding(4.dp))
             }
         }
-    }
-}
-
-private fun formatBytes(bytes: Long): String {
-    val units = arrayOf("B", "KB", "MB", "GB")
-    var value = bytes.toDouble()
-    var unitIndex = 0
-    while (value >= 1024 && unitIndex < units.size - 1) {
-        value /= 1024
-        unitIndex++
-    }
-    return if (unitIndex == 0) "${value.toInt()} ${units[unitIndex]}" else String.format("%.1f %s", value, units[unitIndex])
-}
-
-private fun fractionOf(position: Long, duration: Long): Float =
-    if (duration > 0) (position.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f
-
-private fun formatDuration(ms: Long): String {
-    if (ms <= 0) return "0:00"
-    val totalSeconds = ms / 1000
-    val hours = totalSeconds / 3600
-    val minutes = (totalSeconds % 3600) / 60
-    val seconds = totalSeconds % 60
-    return if (hours > 0) {
-        String.format("%d:%02d:%02d", hours, minutes, seconds)
-    } else {
-        String.format("%d:%02d", minutes, seconds)
+        Column(Modifier.weight(1f)) {
+            Text(
+                entry.name,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (isCurrent) FontWeight.SemiBold else null,
+                color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(formatBytes(entry.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 

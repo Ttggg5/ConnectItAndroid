@@ -79,12 +79,19 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.connectit.android.ui.components.BrandCard
+import com.connectit.android.ui.components.GradientAvatar
+import com.connectit.android.ui.components.GradientButton
+import com.connectit.android.ui.components.GradientPlayButton
+import com.connectit.android.ui.components.VideoGridCard
+import com.connectit.android.ui.theme.BrandColors
 import coil.compose.AsyncImage
 import com.connectit.android.net.videoThumbnailUrl
 import com.connectit.android.service.ConnectItService
@@ -305,20 +312,7 @@ private fun RemoteControlIntro(videoCount: Int, onEnable: () -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(Modifier.height(16.dp))
-            Box(
-                Modifier
-                    .size(88.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.SettingsRemote,
-                    contentDescription = null,
-                    modifier = Modifier.size(44.dp),
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                )
-            }
+            GradientAvatar(icon = Icons.Filled.SettingsRemote, size = 96.dp, shape = RoundedCornerShape(32.dp))
             Spacer(Modifier.height(20.dp))
             Text(
                 "用這台裝置遙控所有觀看端",
@@ -334,8 +328,8 @@ private fun RemoteControlIntro(videoCount: Int, onEnable: () -> Unit) {
             )
 
             Spacer(Modifier.height(28.dp))
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            BrandCard(modifier = Modifier.fillMaxWidth()) {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     IntroStep(1, "開啟遙控模式", "觀看端會鎖定成「只能觀看」,不能自行選片或操作播放。")
                     IntroStep(2, "從影片庫選一部影片", "從這次分享的 $videoCount 部影片中點選,所有觀看端會立刻開始播放。")
                     IntroStep(3, "在這裡控制播放", "播放/暫停、拖曳進度、切換上一部/下一部、調整音量與速度。")
@@ -343,11 +337,13 @@ private fun RemoteControlIntro(videoCount: Int, onEnable: () -> Unit) {
             }
 
             Spacer(Modifier.height(28.dp))
-            Button(onClick = onEnable, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                Icon(Icons.Filled.SettingsRemote, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("開啟遙控模式", style = MaterialTheme.typography.titleSmall)
-            }
+            GradientButton(
+                onClick = onEnable,
+                text = "開啟遙控模式",
+                icon = Icons.Filled.SettingsRemote,
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(vertical = 16.dp),
+            )
             Spacer(Modifier.height(12.dp))
             Text(
                 "隨時可以按右上角的「結束遙控」,觀看端就會恢復自由觀看。",
@@ -366,13 +362,13 @@ private fun IntroStep(number: Int, title: String, description: String) {
             Modifier
                 .size(28.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary),
+                .background(BrandColors.Gradient),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 number.toString(),
                 style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onPrimary,
+                color = Color.White,
             )
         }
         Spacer(Modifier.width(16.dp))
@@ -466,67 +462,19 @@ private fun VideoLibrary(
 
 @Composable
 private fun VideoCard(entry: HostManifestEntry, isCurrent: Boolean, port: Int, onClick: () -> Unit) {
-    Card(
+    VideoGridCard(
+        title = entry.name,
+        subtitle = folderOf(entry.relativePath),
+        thumbnailUrl = videoThumbnailUrl("127.0.0.1", port, entry.relativePath),
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
-        colors = if (isCurrent) {
-            CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
-        } else {
-            CardDefaults.cardColors()
-        },
-        border = if (isCurrent) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
-    ) {
-        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
-            VideoThumbnail(port = port, relativePath = entry.relativePath, modifier = Modifier.fillMaxSize())
-            if (isCurrent) {
-                Row(
-                    Modifier
-                        .align(Alignment.TopStart)
-                        .padding(8.dp)
-                        .clip(RoundedCornerShape(50))
-                        .background(MaterialTheme.colorScheme.primary)
-                        .padding(horizontal = 8.dp, vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        Icons.Filled.GraphicEq,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.onPrimary,
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        "播放中",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                }
-            }
-        }
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-            Text(
-                entry.name,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = if (isCurrent) FontWeight.Bold else null,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            folderOf(entry.relativePath)?.let { folder ->
-                Text(
-                    folder,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
+        isCurrent = isCurrent,
+        showPlayOverlay = false,
+    )
 }
 
 /** 縮圖底下先墊一層佔位圖示:縮圖還在產生或產生失敗(例如格式不支援)時,至少不會是一塊空白。 */
 @Composable
-private fun VideoThumbnail(port: Int, relativePath: String, modifier: Modifier = Modifier) {
+private fun HostVideoThumbnail(port: Int, relativePath: String, modifier: Modifier = Modifier) {
     Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
         Icon(
             Icons.Filled.Movie,
@@ -570,7 +518,7 @@ private fun ControlPanel(controls: HostControls, compact: Boolean) {
         if (compact) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
                 if (entry != null) {
-                    VideoThumbnail(
+                    HostVideoThumbnail(
                         port = controls.port,
                         relativePath = entry.relativePath,
                         modifier = Modifier.width(80.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp)),
@@ -581,7 +529,7 @@ private fun ControlPanel(controls: HostControls, compact: Boolean) {
             }
         } else {
             if (entry != null) {
-                VideoThumbnail(
+                HostVideoThumbnail(
                     port = controls.port,
                     relativePath = entry.relativePath,
                     modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(12.dp)),
@@ -652,17 +600,13 @@ private fun ControlPanel(controls: HostControls, compact: Boolean) {
             ) {
                 Icon(Icons.Filled.Replay10, contentDescription = "倒退 10 秒", modifier = Modifier.size(28.dp))
             }
-            FilledIconButton(
+            GradientPlayButton(
+                icon = if (snapshot.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                contentDescription = if (snapshot.isPlaying) "暫停" else "播放",
                 onClick = { service.remoteControlSetPlaying(!snapshot.isPlaying); controls.refresh() },
                 enabled = hasVideo,
-                modifier = Modifier.size(if (compact) 56.dp else 72.dp),
-            ) {
-                Icon(
-                    if (snapshot.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                    contentDescription = if (snapshot.isPlaying) "暫停" else "播放",
-                    modifier = Modifier.size(if (compact) 32.dp else 40.dp),
-                )
-            }
+                size = if (compact) 56.dp else 72.dp,
+            )
             IconButton(
                 onClick = {
                     val target = snapshot.positionMs + SeekStepMs

@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.SystemClock
 import com.connectit.android.model.ConnectedPeer
 import com.connectit.android.model.ConnectionRequest
+import com.connectit.android.model.ConnectionRequestOutcome
 import com.connectit.android.model.FileOffer
 import com.connectit.android.model.FileTransferEnded
 import com.connectit.android.model.FolderEntry
@@ -28,6 +29,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -191,15 +193,31 @@ class ConnectionEngine(
         }
     }
 
+    /**
+     * 主動連線並送出連線請求,等待對方確認,回傳詳細結果供 UI 顯示對應的說明。
+     * 呼叫端的 coroutine 被取消時(使用者在「等待對方接受」對話框按了取消),會關閉這條尚未建立完成的
+     * socket 讓阻塞中的連線/讀取立刻中斷,並照一般 coroutine 取消流程丟出 CancellationException。
+     */
     suspend fun requestConnection(
         address: String,
         port: Int,
         myDeviceName: String,
         remoteDisplayName: String,
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): ConnectionRequestOutcome = withContext(Dispatchers.IO) {
         val socket = Socket()
+        // 阻塞式的 connect/read 不會理會 coroutine 取消,取消時直接關掉 socket 讓它們丟例外結束。
+        val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->
+            if (cause is CancellationException) socket.closeQuietly()
+        }
         try {
-            socket.connect(InetSocketAddress(address, port), connectTimeoutMs)
+            try {
+                socket.connect(InetSocketAddress(address, port), connectTimeoutMs)
+            } catch (e: Exception) {
+                ensureActive()
+                onStatusChanged?.invoke("連線失敗:${e.message}")
+                socket.closeQuietly()
+                return@withContext ConnectionRequestOutcome.UNREACHABLE
+            }
             val input = socket.getInputStream()
             val output = socket.getOutputStream()
 
@@ -207,28 +225,39 @@ class ConnectionEngine(
             writeLine(output, ConnectMessage(type = "request", deviceName = myDeviceName).toJson())
 
             socket.soTimeout = RESPONSE_TIMEOUT_MS
+            var timedOut = false
             val line = try {
                 readLine(input)
             } catch (e: SocketTimeoutException) {
+                timedOut = true
                 null
             }
+            ensureActive()
             val response = line?.let { ConnectMessage.parse(it) }
 
             if (response?.type == "accept") {
                 socket.soTimeout = 0
+                // 連線成功後這條 socket 要繼續用,不能再被上面的取消處理關掉。
+                cancelHandle?.dispose()
                 becomeConnected(socket, remoteDisplayName, address)
-                true
+                ConnectionRequestOutcome.ACCEPTED
             } else {
                 onStatusChanged?.invoke(
-                    if (response == null) "連線逾時,$remoteDisplayName 沒有回應。" else "$remoteDisplayName 拒絕了連線請求。"
+                    if (timedOut) "連線逾時,$remoteDisplayName 沒有回應。" else "$remoteDisplayName 拒絕了連線請求。"
                 )
                 socket.closeQuietly()
-                false
+                if (timedOut) ConnectionRequestOutcome.TIMEOUT else ConnectionRequestOutcome.REJECTED
             }
+        } catch (e: CancellationException) {
+            socket.closeQuietly()
+            throw e
         } catch (e: Exception) {
+            ensureActive()
             onStatusChanged?.invoke("連線失敗:${e.message}")
             socket.closeQuietly()
-            false
+            ConnectionRequestOutcome.UNREACHABLE
+        } finally {
+            cancelHandle?.dispose()
         }
     }
 
@@ -865,7 +894,10 @@ class ConnectionEngine(
         }
 
         onFileTransferEnded?.invoke(
-            FileTransferEnded(transfer.transferId, TransferDirection.RECEIVING, TransferEndReason.COMPLETED, transfer.fileName, transfer.savedDisplayPath)
+            FileTransferEnded(
+                transfer.transferId, TransferDirection.RECEIVING, TransferEndReason.COMPLETED, transfer.fileName,
+                transfer.savedDisplayPath, savedUri = (transfer.savedToken as? android.net.Uri)?.toString(),
+            )
         )
     }
 

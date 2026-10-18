@@ -4,6 +4,47 @@ enum class TransferDirection { SENDING, RECEIVING }
 
 enum class TransferEndReason { COMPLETED, REJECTED, CANCELLED, CANCELLED_BY_REMOTE, CONNECTION_CLOSED, FAILED }
 
+/** 主動送出連線請求的結果,UI 依此顯示對應的說明(對應 Windows 端 ConnectionRequestOutcome)。 */
+enum class ConnectionRequestOutcome {
+    /** 對方按下接受,連線已建立。 */
+    ACCEPTED,
+    /** 對方按下拒絕(或直接關閉了連線)。 */
+    REJECTED,
+    /** 已送出請求,但對方在時限內沒有回應。 */
+    TIMEOUT,
+    /** 根本連不上對方(離線、位址不可達、被防火牆擋下)。 */
+    UNREACHABLE,
+}
+
+/**
+ * 這次連線期間的一筆傳輸紀錄,顯示在「目前連線」卡片的傳輸紀錄清單;接收成功、而且有 [savedUri] 的
+ * 項目可以直接開啟。只存在記憶體裡,斷線後清空(對應 Windows 端 TransferRecord)。
+ */
+data class TransferRecord(
+    val direction: TransferDirection,
+    val reason: TransferEndReason,
+    val name: String,
+    val isFolder: Boolean,
+    val savedUri: String? = null,
+    val timeMillis: Long = System.currentTimeMillis(),
+) {
+    val isReceived: Boolean get() = direction == TransferDirection.RECEIVING
+    val succeeded: Boolean get() = reason == TransferEndReason.COMPLETED
+
+    /** 接收成功的檔案可以直接開啟;資料夾/多檔案則提供「開啟下載資料夾」。 */
+    val canOpen: Boolean get() = isReceived && succeeded && (isFolder || savedUri != null)
+
+    val statusText: String
+        get() = when (reason) {
+            TransferEndReason.COMPLETED -> if (isReceived) "已接收" else "已傳送"
+            TransferEndReason.REJECTED -> "對方拒絕"
+            TransferEndReason.CANCELLED -> "已取消"
+            TransferEndReason.CANCELLED_BY_REMOTE -> "對方取消"
+            TransferEndReason.CONNECTION_CLOSED -> "連線中斷"
+            TransferEndReason.FAILED -> "失敗"
+        }
+}
+
 /** 對方送出連線請求,等待使用者按下接受/拒絕。 */
 data class ConnectionRequest(
     val requesterName: String,
@@ -46,6 +87,9 @@ data class FileTransferEnded(
     val reason: TransferEndReason,
     val fileName: String,
     val savedFilePath: String? = null,
+    /** 接收成功時檔案的 content:// Uri 字串(MediaStore 或 SAF 文件),供「開啟檔案」使用;
+     * 舊版 Android(API 28 以下)直接寫檔案路徑的情況為 null。 */
+    val savedUri: String? = null,
 )
 
 data class FolderTransferEnded(

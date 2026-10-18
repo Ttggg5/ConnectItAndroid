@@ -92,6 +92,8 @@ fun TvVideoServerScreen(
     server: DiscoveredDevice,
     onBack: () -> Unit,
     onPlay: (entries: List<VideoManifestEntry>, startIndex: Int, remoteControlEnabled: Boolean) -> Unit,
+    /** 從「繼續觀看」進來時要直接播放的影片(相對路徑)。 */
+    resumePath: String? = null,
 ) {
     var state by remember(server) { mutableStateOf<TvManifestState>(TvManifestState.Loading) }
     val sort = VideoSortOption.NAME_ASC
@@ -126,6 +128,13 @@ fun TvVideoServerScreen(
             }
             state = TvManifestState.RemoteWaiting(response)
         } else {
+            val resumeIndex = resumePath?.let { path ->
+                response.entries.sortedByOption(sort).indexOfFirst { it.relativePath == path }
+            }?.takeIf { it >= 0 }
+            if (resumeIndex != null) {
+                onPlay(response.entries.sortedByOption(sort), resumeIndex, false)
+                return@LaunchedEffect
+            }
             state = TvManifestState.Loaded(response)
         }
     }
@@ -241,7 +250,7 @@ fun TvVideoServerScreen(
                     items(subfolders, key = { "folder:$it" }) { name ->
                         val childPath = if (currentFolder.isEmpty()) name else "$currentFolder/$name"
                         val count = folderVideoCounts[name] ?: 0
-                        Card(onClick = { currentFolder = childPath }, modifier = Modifier.fillMaxWidth()) {
+                        Card(onClick = { currentFolder = childPath }, modifier = Modifier.fillMaxWidth(), border = tvBrandCardBorder(), scale = tvBrandCardScale()) {
                             Column {
                                 Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f), contentAlignment = Alignment.Center) {
                                     Icon(Icons.Filled.Folder, contentDescription = null, modifier = Modifier.size(48.dp))
@@ -256,7 +265,7 @@ fun TvVideoServerScreen(
 
                     items(visibleEntries, key = { it.relativePath }) { entry ->
                         val index = indexByPath.getValue(entry.relativePath)
-                        Card(onClick = { onPlay(visibleEntries, index, false) }, modifier = Modifier.fillMaxWidth()) {
+                        Card(onClick = { onPlay(visibleEntries, index, false) }, modifier = Modifier.fillMaxWidth(), border = tvBrandCardBorder(), scale = tvBrandCardScale()) {
                             Column {
                                 Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
                                     AsyncImage(

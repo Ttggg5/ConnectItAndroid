@@ -7,11 +7,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -19,11 +20,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOff
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
-import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.SettingsRemote
-import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -42,9 +45,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import com.connectit.android.ui.components.EmptyState
+import com.connectit.android.ui.components.FolderGridCard
+import com.connectit.android.ui.components.IconTile
+import com.connectit.android.ui.components.RadarPulse
+import com.connectit.android.ui.components.VideoGridCard
+import com.connectit.android.ui.components.formatBytes
 import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.model.VideoManifestResponse
@@ -122,6 +130,8 @@ fun VideoServerScreen(
     server: DiscoveredDevice,
     onBack: () -> Unit,
     onPlay: (entries: List<VideoManifestEntry>, startIndex: Int, remoteControlEnabled: Boolean) -> Unit,
+    /** 從「繼續觀看」進來時要直接播放的影片(相對路徑):清單一載入就跳進播放畫面,不用使用者再找一次。 */
+    resumePath: String? = null,
 ) {
     var state by remember(server) { mutableStateOf<ManifestState>(ManifestState.Loading) }
     var sort by remember { mutableStateOf(VideoSortOption.NAME_ASC) }
@@ -167,6 +177,14 @@ fun VideoServerScreen(
             }
             state = ManifestState.RemoteWaiting(response)
         } else {
+            val resumeIndex = resumePath?.let { path ->
+                response.entries.sortedByOption(sort).indexOfFirst { it.relativePath == path }
+            }?.takeIf { it >= 0 }
+            if (resumeIndex != null) {
+                // 用跟「攤平檢視」一樣的全域排序清單,上一部/下一部才會照常運作。
+                onPlay(response.entries.sortedByOption(sort), resumeIndex, false)
+                return@LaunchedEffect
+            }
             state = ManifestState.Loaded(response)
         }
     }
@@ -203,7 +221,16 @@ fun VideoServerScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(server.displayName) },
+                title = {
+                    Column {
+                        Text(server.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            "${server.host}:${server.port}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -231,6 +258,11 @@ fun VideoServerScreen(
                                         sort = option
                                         sortMenuExpanded = false
                                     },
+                                    leadingIcon = if (option == sort) {
+                                        { Icon(Icons.Filled.Check, contentDescription = null) }
+                                    } else {
+                                        null
+                                    },
                                 )
                             }
                         }
@@ -244,18 +276,16 @@ fun VideoServerScreen(
                 CircularProgressIndicator()
             }
             is ManifestState.Failed -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                Text("無法取得影片清單,請確認對方裝置仍在線上。")
+                EmptyState(
+                    title = "無法取得影片清單",
+                    description = "請確認對方裝置仍在線上、而且還在分享影片,再回上一頁重試一次。",
+                ) { IconTile(icon = Icons.Filled.CloudOff, size = 64.dp) }
             }
             is ManifestState.RemoteWaiting -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        Icons.Filled.SettingsRemote,
-                        contentDescription = null,
-                        modifier = Modifier.padding(bottom = 12.dp),
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                    Text("遙控模式已開啟,等待主機選擇影片…")
-                }
+                EmptyState(
+                    title = "遙控模式已開啟",
+                    description = "正在等待主機選擇影片,選好後會自動開始播放。",
+                ) { RadarPulse(icon = Icons.Filled.SettingsRemote) }
             }
             is ManifestState.Loaded -> {
                 // 上一部/下一部、自動播放下一部都靠這份「全域排序後」的清單走(見 onPlay 呼叫處),
@@ -288,7 +318,11 @@ fun VideoServerScreen(
                             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            TextButton(onClick = { currentFolder = "" }) { Text("首頁") }
+                            TextButton(onClick = { currentFolder = "" }) {
+                                Icon(Icons.Filled.Home, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("首頁")
+                            }
                             var accumulated = ""
                             val segments = currentFolder.split('/')
                             segments.forEachIndexed { i, segment ->
@@ -310,7 +344,9 @@ fun VideoServerScreen(
 
                     if (subfolders.isEmpty() && visibleEntries.isEmpty()) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("這個資料夾是空的。")
+                            EmptyState(title = "這個資料夾是空的", description = null) {
+                                IconTile(icon = Icons.Filled.FolderOff, size = 64.dp)
+                            }
                         }
                         return@Column
                     }
@@ -327,29 +363,11 @@ fun VideoServerScreen(
                     ) {
                         items(subfolders, key = { "folder:$it" }) { name ->
                             val childPath = if (currentFolder.isEmpty()) name else "$currentFolder/$name"
-                            val count = folderVideoCounts[name] ?: 0
-                            Card(
-                                modifier = Modifier.fillMaxWidth(),
+                            FolderGridCard(
+                                name = name,
+                                videoCount = folderVideoCounts[name] ?: 0,
                                 onClick = { currentFolder = childPath },
-                            ) {
-                                Column {
-                                    Box(
-                                        modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Icon(
-                                            Icons.Filled.Folder,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(48.dp),
-                                            tint = MaterialTheme.colorScheme.primary,
-                                        )
-                                    }
-                                    Column(modifier = Modifier.padding(12.dp)) {
-                                        Text(name, style = MaterialTheme.typography.titleSmall, maxLines = 2)
-                                        Text("$count 部影片", style = MaterialTheme.typography.bodySmall)
-                                    }
-                                }
-                            }
+                            )
                         }
 
                         items(visibleEntries, key = { it.relativePath }) { entry ->
@@ -357,49 +375,19 @@ fun VideoServerScreen(
                             // 模式才會照全域排序橫跨所有資料夾——跟網頁版的邏輯一致(見
                             // VideoStreamingService.cs / VideoHostPages.kt 的說明)。
                             val index = playIndexByPath.getValue(entry.relativePath)
-                            Card(
-                                modifier = Modifier.fillMaxWidth(),
-                                // 只有在 ManifestState.Loaded 分支才會畫出這個可自由瀏覽的格線,遠端控制
-                                // 模式一開啟就會轉去 RemoteWaiting/直接進播放畫面,不會停在這裡讓人選片,
-                                // 所以這裡點下去一定是「自由觀看」,不用再帶遠端控制旗標。
+                            // 只有在 ManifestState.Loaded 分支才會畫出這個可自由瀏覽的格線,遠端控制
+                            // 模式一開啟就會轉去 RemoteWaiting/直接進播放畫面,不會停在這裡讓人選片,
+                            // 所以這裡點下去一定是「自由觀看」,不用再帶遠端控制旗標。
+                            VideoGridCard(
+                                title = entry.name,
+                                subtitle = formatBytes(entry.size),
+                                thumbnailUrl = videoThumbnailUrl(server.host, server.port, entry.relativePath),
                                 onClick = { onPlay(playList, index, false) },
-                            ) {
-                                Column {
-                                    Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
-                                        AsyncImage(
-                                            model = videoThumbnailUrl(server.host, server.port, entry.relativePath),
-                                            contentDescription = null,
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentScale = ContentScale.Crop,
-                                        )
-                                        Icon(
-                                            Icons.Filled.PlayCircle,
-                                            contentDescription = "播放",
-                                            modifier = Modifier.align(Alignment.Center),
-                                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                                        )
-                                    }
-                                    Column(modifier = Modifier.padding(12.dp)) {
-                                        Text(entry.name, style = MaterialTheme.typography.titleSmall, maxLines = 2)
-                                        Text(formatBytes(entry.size), style = MaterialTheme.typography.bodySmall)
-                                    }
-                                }
-                            }
+                            )
                         }
                     }
                 }
             }
         }
     }
-}
-
-private fun formatBytes(bytes: Long): String {
-    val units = arrayOf("B", "KB", "MB", "GB")
-    var value = bytes.toDouble()
-    var unitIndex = 0
-    while (value >= 1024 && unitIndex < units.size - 1) {
-        value /= 1024
-        unitIndex++
-    }
-    return if (unitIndex == 0) "${value.toInt()} ${units[unitIndex]}" else String.format("%.1f %s", value, units[unitIndex])
 }

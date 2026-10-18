@@ -45,6 +45,9 @@ data class AppSettings(
     val videoDefaultSpeed: Double = VideoServerPlaybackOptions.DEFAULT_PLAYBACK_SPEED,
     /** 使用者額外加入的副檔名(內建清單以外),已正規化成小寫、不含開頭 '.'、不重複。 */
     val videoExtraExtensions: List<String> = emptyList(),
+    /** 首次啟動引導是否已經完成(或被略過)。預設 true:DataStore 還沒讀出來之前不要閃一下引導畫面,
+     * 實際值由 [SettingsRepository.settings] 依儲存的內容決定(沒存過就是 false)。 */
+    val onboardingCompleted: Boolean = true,
 ) {
     companion object {
         const val DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
@@ -79,6 +82,7 @@ class SettingsRepository(private val context: Context) {
         val VIDEO_DEFAULT_VOLUME_PERCENT = intPreferencesKey("video_default_volume_percent")
         val VIDEO_DEFAULT_SPEED = doublePreferencesKey("video_default_speed")
         val VIDEO_EXTRA_EXTENSIONS = stringPreferencesKey("video_extra_extensions")
+        val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -104,6 +108,7 @@ class SettingsRepository(private val context: Context) {
             videoDefaultSpeed = prefs[Keys.VIDEO_DEFAULT_SPEED]?.takeIf { VideoServerPlaybackOptions.VALID_PLAYBACK_SPEEDS.contains(it) }
                 ?: VideoServerPlaybackOptions.DEFAULT_PLAYBACK_SPEED,
             videoExtraExtensions = VideoLibraryScanner.parseExtraExtensions(prefs[Keys.VIDEO_EXTRA_EXTENSIONS] ?: ""),
+            onboardingCompleted = prefs[Keys.ONBOARDING_COMPLETED] ?: false,
         )
     }
 
@@ -192,6 +197,10 @@ class SettingsRepository(private val context: Context) {
         val normalized = VideoLibraryScanner.parseExtraExtensions(rawText)
         context.dataStore.edit { it[Keys.VIDEO_EXTRA_EXTENSIONS] = normalized.joinToString(",") }
         return normalized
+    }
+
+    suspend fun setOnboardingCompleted(completed: Boolean) {
+        context.dataStore.edit { it[Keys.ONBOARDING_COMPLETED] = completed }
     }
 
     fun defaultDeviceName(): String = Build.MODEL ?: "Android"

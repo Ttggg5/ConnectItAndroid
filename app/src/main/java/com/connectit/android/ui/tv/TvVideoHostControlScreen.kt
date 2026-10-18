@@ -140,7 +140,7 @@ fun TvVideoHostControlScreen(service: ConnectItService, onBack: () -> Unit) {
 
                     val duration = durationMs
                     LinearProgressIndicator(
-                        progress = { fractionOf(snapshot.positionMs, duration ?: 0L) },
+                        progress = { tvFractionOf(snapshot.positionMs, duration ?: 0L) },
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Text(
@@ -259,6 +259,8 @@ fun TvVideoHostControlScreen(service: ConnectItService, onBack: () -> Unit) {
             items(entries, key = { it.relativePath }) { entry ->
                 val isCurrent = entry.relativePath == snapshot.videoRelativePath
                 Card(
+                    border = tvBrandCardBorder(),
+                    scale = tvBrandCardScale(),
                     onClick = {
                         service.remoteControlPlayVideo(entry.relativePath)
                         snapshot = service.currentPlaybackSnapshot()
@@ -287,9 +289,6 @@ fun TvVideoHostControlScreen(service: ConnectItService, onBack: () -> Unit) {
         }
     }
 }
-
-private fun fractionOf(position: Long, duration: Long): Float =
-    if (duration > 0) (position.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f
 
 private fun formatMs(ms: Long): String {
     if (ms <= 0) return "0:00"

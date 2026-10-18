@@ -27,16 +27,19 @@ import com.connectit.android.connection.ConnectionEngine
 import com.connectit.android.discovery.NsdDiscoveryManager
 import com.connectit.android.model.ConnectedPeer
 import com.connectit.android.model.ConnectionRequest
+import com.connectit.android.model.ConnectionRequestOutcome
 import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.FileTransferEnded
 import com.connectit.android.model.FolderEntry
 import com.connectit.android.model.FolderTransferEnded
 import com.connectit.android.model.TransferDirection
 import com.connectit.android.model.TransferEndReason
+import com.connectit.android.model.TransferRecord
 import com.connectit.android.repo.AppSettings
 import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.repo.SettingsRepository
 import com.connectit.android.util.DownloadStorage
+import com.connectit.android.util.NetworkUtils
 import com.connectit.android.util.SafUtils
 import com.connectit.android.video.HostManifestEntry
 import com.connectit.android.video.PlaybackControlState
@@ -44,6 +47,7 @@ import com.connectit.android.video.VideoHostPages
 import com.connectit.android.video.VideoHostServer
 import com.connectit.android.video.VideoServerPlaybackOptions
 import com.connectit.android.video.VideoSort
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -69,8 +73,12 @@ sealed interface ConnectionUiState {
 /** 這台裝置目前是否正把自己的影片庫分享出去(見 [VideoHostServer])。 */
 sealed interface VideoHostUiState {
     data object Idle : VideoHostUiState
-    data class Running(val port: Int, val videoCount: Int, val folderName: String) : VideoHostUiState
+    /** [url] 給其他裝置用瀏覽器觀看的網址(區網 IP + 連接埠),找不到區網 IP 時為 null。 */
+    data class Running(val port: Int, val videoCount: Int, val folderName: String, val url: String? = null) : VideoHostUiState
 }
+
+/** 主動連線失敗(被拒絕/沒回應/連不到),供畫面顯示對應原因與建議的說明對話框。 */
+data class ConnectFailure(val deviceName: String, val outcome: ConnectionRequestOutcome)
 
 /**
  * 主機端遙控面板的播放清單設定:決定影片庫的顯示順序與上一部/下一部/自動播放下一部要切到哪一部。
@@ -169,6 +177,22 @@ class ConnectItService : LifecycleService() {
     private val _transferState = MutableStateFlow<TransferUiState?>(null)
     val transferState: StateFlow<TransferUiState?> = _transferState.asStateFlow()
 
+    /** 正在等待對方接受連線請求的裝置(顯示「等待對方接受」對話框用),沒有在等時為 null。 */
+    private val _connectingTo = MutableStateFlow<DiscoveredDevice?>(null)
+    val connectingTo: StateFlow<DiscoveredDevice?> = _connectingTo.asStateFlow()
+    private var connectJob: Job? = null
+
+    private val _connectFailure = MutableStateFlow<ConnectFailure?>(null)
+    val connectFailure: StateFlow<ConnectFailure?> = _connectFailure.asStateFlow()
+
+    /** 這次連線期間的傳輸紀錄(新的在前),斷線或重新連線時清空。 */
+    private val _transferHistory = MutableStateFlow<List<TransferRecord>>(emptyList())
+    val transferHistory: StateFlow<List<TransferRecord>> = _transferHistory.asStateFlow()
+
+    /** 剛接收完成、可以直接開啟的項目:傳輸卡片會切成「完成」狀態顯示「開啟」按鈕,直到使用者關閉或開始下一個傳輸。 */
+    private val _completedTransfer = MutableStateFlow<TransferRecord?>(null)
+    val completedTransfer: StateFlow<TransferRecord?> = _completedTransfer.asStateFlow()
+
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
     val logMessages: StateFlow<List<String>> = _logMessages.asStateFlow()
 
@@ -256,13 +280,50 @@ class ConnectItService : LifecycleService() {
 
     fun refreshDevices() = deviceDiscovery.refresh()
 
-    fun connectTo(device: DiscoveredDevice, myDeviceName: String) {
-        lifecycleScope.launch {
-            val accepted = connectionEngine.requestConnection(device.host, device.port, myDeviceName, device.displayName)
-            if (!accepted) {
-                pushEvent("${device.displayName} 未接受連線請求。")
+    /**
+     * 送出連線請求並等待對方接受。等待期間 [connectingTo] 會是這台裝置(畫面顯示可以取消的等待對話框);
+     * 被拒絕/沒回應/連不到時透過 [connectFailure] 告知原因。[onAccepted] 在對方接受後呼叫一次——
+     * 從其他 App「分享」檔案過來時,用它在連上之後自動開始傳送。
+     */
+    fun connectTo(device: DiscoveredDevice, myDeviceName: String, onAccepted: (() -> Unit)? = null) {
+        if (connectJob?.isActive == true) return
+        _connectFailure.value = null
+        _connectingTo.value = device
+        connectJob = lifecycleScope.launch {
+            try {
+                val outcome = connectionEngine.requestConnection(device.host, device.port, myDeviceName, device.displayName)
+                if (outcome == ConnectionRequestOutcome.ACCEPTED) {
+                    onAccepted?.invoke()
+                } else {
+                    _connectFailure.value = ConnectFailure(device.displayName, outcome)
+                    pushLog(
+                        when (outcome) {
+                            ConnectionRequestOutcome.REJECTED -> "${device.displayName} 拒絕了連線請求。"
+                            ConnectionRequestOutcome.TIMEOUT -> "${device.displayName} 沒有回應連線請求。"
+                            else -> "連不到 ${device.displayName}。"
+                        }
+                    )
+                }
+            } catch (e: CancellationException) {
+                pushEvent("已取消連線請求。")
+                throw e
+            } finally {
+                _connectingTo.value = null
             }
         }
+    }
+
+    /** 使用者在「等待對方接受」對話框按了取消。 */
+    fun cancelConnect() {
+        connectJob?.cancel()
+    }
+
+    fun dismissConnectFailure() {
+        _connectFailure.value = null
+    }
+
+    fun dismissCompletedTransfer() {
+        _completedTransfer.value = null
     }
 
     /** [trust] 為 true 時(必須同時 [accept])把這台裝置加入信任清單,之後的連線請求不再詢問。 */
@@ -281,6 +342,8 @@ class ConnectItService : LifecycleService() {
         connectionEngine.disconnect()
         _connectionState.value = ConnectionUiState.Idle
         _transferState.value = null
+        _completedTransfer.value = null
+        _transferHistory.value = emptyList()
         pushEvent("已中斷連線。")
     }
 
@@ -291,6 +354,7 @@ class ConnectItService : LifecycleService() {
             pushEvent("目前已有檔案傳輸正在進行,請稍後再試。")
             return
         }
+        _completedTransfer.value = null
         _transferState.value = TransferUiState(name, "等待對方接受...", 0f)
         connectionEngine.sendFile(uri, name, size)
     }
@@ -302,6 +366,7 @@ class ConnectItService : LifecycleService() {
             return
         }
         val title = if (files.size == 1) files[0].second else "${files.size} 個檔案"
+        _completedTransfer.value = null
         _transferState.value = TransferUiState(title, "等待對方接受...", 0f)
         connectionEngine.sendFiles(files)
     }
@@ -311,6 +376,7 @@ class ConnectItService : LifecycleService() {
             pushEvent("目前已有檔案傳輸正在進行,請稍後再試。")
             return
         }
+        _completedTransfer.value = null
         _transferState.value = TransferUiState(folderName, "等待對方接受...", 0f)
         connectionEngine.sendFolder(folderName, entries)
     }
@@ -338,6 +404,7 @@ class ConnectItService : LifecycleService() {
                     port = videoHostServer.port,
                     videoCount = videoHostServer.manifestCount,
                     folderName = SafUtils.displayNameOf(applicationContext, treeUri),
+                    url = NetworkUtils.lanIpv4Address()?.let { "http://$it:${videoHostServer.port}/" },
                 )
                 // 遙控面板的排序/隨機播放/自動播放沿用設定頁的影片伺服器預設值,之後在遙控畫面上的
                 // 調整只影響這一次分享,不會寫回設定。
@@ -544,6 +611,8 @@ class ConnectItService : LifecycleService() {
             _pendingConnectionRequest.value = null
             clearConnectionRequestNotification()
             _connectionState.value = ConnectionUiState.Connected(peer)
+            _transferHistory.value = emptyList()
+            _completedTransfer.value = null
             pushLog("已與 ${peer.name} (${peer.address}) 建立連線。")
             notifyConnected(peer.name)
         }
@@ -552,6 +621,8 @@ class ConnectItService : LifecycleService() {
             val peerName = (_connectionState.value as? ConnectionUiState.Connected)?.peer?.name
             _connectionState.value = ConnectionUiState.Idle
             _transferState.value = null
+            _completedTransfer.value = null
+            _transferHistory.value = emptyList()
             pushEvent("對方已中斷連線。")
             notifyPeerDisconnected(peerName ?: getString(R.string.notification_incoming_transfer_unknown_peer))
         }
@@ -560,11 +631,13 @@ class ConnectItService : LifecycleService() {
         // 直接接受並用系統通知讓使用者知道有東西正在傳進來(尤其是 App 在背景時)。
         connectionEngine.onFileOffered = { offer ->
             connectionEngine.respondToFileOffer(offer.transferId, true)
+            _completedTransfer.value = null
             _transferState.value = TransferUiState(offer.fileName, "接收中...", 0f)
             notifyIncomingTransfer(offer.fileName)
         }
         connectionEngine.onFolderOffered = { offer ->
             connectionEngine.respondToFolderOffer(offer.transferId, true)
+            _completedTransfer.value = null
             val title = if (offer.isBatch) "${offer.totalEntries} 個檔案" else offer.folderName
             _transferState.value = TransferUiState(title, "接收中...(共 ${offer.totalEntries} 個檔案)", 0f)
             notifyIncomingTransfer(title)
@@ -592,14 +665,29 @@ class ConnectItService : LifecycleService() {
         connectionEngine.onFileTransferEnded = { ended ->
             _transferState.value = null
             clearIncomingTransferNotification()
+            recordTransfer(
+                TransferRecord(ended.direction, ended.reason, ended.fileName, isFolder = false, savedUri = ended.savedUri)
+            )
             pushEvent(formatFileEndedMessage(ended))
         }
 
         connectionEngine.onFolderTransferEnded = { ended ->
             _transferState.value = null
             clearIncomingTransferNotification()
+            recordTransfer(
+                TransferRecord(
+                    ended.direction, ended.reason,
+                    if (ended.isBatch) "${ended.entryCount} 個檔案" else ended.folderName,
+                    isFolder = true,
+                )
+            )
             pushEvent(formatFolderEndedMessage(ended))
         }
+    }
+
+    private fun recordTransfer(record: TransferRecord) {
+        _transferHistory.update { (listOf(record) + it).take(MAX_TRANSFER_HISTORY) }
+        _completedTransfer.value = if (record.canOpen) record else null
     }
 
     private fun upsert(list: List<DiscoveredDevice>, device: DiscoveredDevice): List<DiscoveredDevice> {
@@ -814,5 +902,6 @@ class ConnectItService : LifecycleService() {
         private const val DISCONNECTED_NOTIFICATION_ID = 3
         private const val CONNECTION_REQUEST_NOTIFICATION_ID = 4
         private const val CONNECTED_NOTIFICATION_ID = 5
+        private const val MAX_TRANSFER_HISTORY = 50
     }
 }

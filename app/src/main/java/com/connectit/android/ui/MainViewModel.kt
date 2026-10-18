@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.net.Uri
 import android.os.IBinder
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
@@ -24,6 +25,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val service: StateFlow<ConnectItService?> = _service.asStateFlow()
 
     private var isBound = false
+
+    /** 從其他 App「分享」過來、還沒決定要傳給誰的檔案(見 MainActivity.handleShareIntent)。 */
+    private val _pendingShare = MutableStateFlow<List<Uri>>(emptyList())
+    val pendingShare: StateFlow<List<Uri>> = _pendingShare.asStateFlow()
+
+    /** 這次程序存活期間是否已經詢問過通知權限,避免每次重組/旋轉螢幕都再問一次。 */
+    var notificationPermissionRequested = false
+
+    fun setPendingShare(uris: List<Uri>) {
+        _pendingShare.value = uris
+    }
+
+    fun clearPendingShare() {
+        _pendingShare.value = emptyList()
+    }
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
