@@ -190,6 +190,9 @@ fun ConnectionPanel(service: ConnectItService, peer: ConnectedPeer, modifier: Mo
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
                         )
+                        state.percentText?.let {
+                            Text(it, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+                        }
                         IconButton(onClick = { service.cancelTransfer() }) {
                             Icon(Icons.Filled.Close, contentDescription = "取消傳輸")
                         }

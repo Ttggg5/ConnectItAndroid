@@ -34,6 +34,7 @@ data class ConnectMessage(val type: String, val deviceName: String? = null) {
 /**
  * "file-offer" | "file-accept" | "file-reject" | "file-cancel" | "file-complete" |
  * "folder-offer" | "folder-accept" | "folder-reject" | "folder-cancel" | "folder-complete"
+ * "ping"(連線心跳,沒有 TransferId;舊版收到會直接忽略)
  */
 data class FileControlMessage(
     val type: String,

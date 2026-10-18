@@ -109,7 +109,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 private val SkipDurationMs = 10_000L
-private val AutoplayCountdownSeconds = 5
 private val SpeedOptions = listOf(0.5f, 1f, 1.25f, 1.5f, 2f)
 
 /**
@@ -163,8 +162,6 @@ fun VideoPlayerScreen(
     var mutedVolume by remember { mutableStateOf<Float?>(null) }
     var speed by remember { mutableStateOf(1f) }
     var isFullscreen by remember { mutableStateOf(false) }
-    var countdownSeconds by remember { mutableStateOf<Int?>(null) }
-    var countdownJob by remember { mutableStateOf<Job?>(null) }
     // 觀看頁清單自己的顯示排序,只影響清單怎麼列出來,不影響上一部/下一部、自動播放下一部的順序
     // ——那些仍照 entries 原本的順序走(進這個畫面之前,在 VideoServerScreen 選好、固定下來的順序)。
     var sortOption by remember { mutableStateOf(VideoSortOption.NAME_ASC) }
@@ -192,17 +189,11 @@ fun VideoPlayerScreen(
 
     fun videoKey(entry: VideoManifestEntry) = "${server.host}:${server.port}/${entry.relativePath}"
 
-    fun cancelCountdown() {
-        countdownJob?.cancel()
-        countdownJob = null
-        countdownSeconds = null
-    }
 
     var pendingStartPositionMs by remember { mutableStateOf(startPositionMs) }
 
     fun playIndex(index: Int) {
         if (index !in entries.indices) return
-        cancelCountdown()
         currentIndex = index
         val entry = entries[index]
         val mediaItem = MediaItem.Builder()
@@ -226,20 +217,6 @@ fun VideoPlayerScreen(
         }
     }
 
-    fun startAutoplayCountdown(nextIndex: Int) {
-        countdownJob?.cancel()
-        countdownJob = scope.launch {
-            var remaining = AutoplayCountdownSeconds
-            countdownSeconds = remaining
-            while (remaining > 0) {
-                delay(1000)
-                remaining--
-                countdownSeconds = remaining
-            }
-            countdownSeconds = null
-            playIndex(nextIndex)
-        }
-    }
 
     fun applyFullscreen(enabled: Boolean) {
         isFullscreen = enabled
@@ -322,7 +299,7 @@ fun VideoPlayerScreen(
                     val nextIndex = playOrder.getOrNull(position + 1)
                     // 遠端控制中由主機決定要不要/切到哪一部,觀看端不自己倒數跳下一部。
                     if (autoplayNext && !remoteEnabled && nextIndex != null) {
-                        startAutoplayCountdown(nextIndex)
+                        scope.launch { playIndex(nextIndex) }
                     }
                 }
             }
@@ -490,26 +467,6 @@ fun VideoPlayerScreen(
                             },
                         )
 
-                        countdownSeconds?.let { seconds ->
-                            Surface(
-                                // 控制列現在疊在影片底部,倒數卡片要多留一點底部空間才不會被蓋住
-                                // (跟網頁版把 .next-overlay 往上挪、避開疊加控制列的道理一樣)。
-                                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, top = 16.dp, bottom = 96.dp),
-                                shape = RoundedCornerShape(16.dp),
-                                color = Color.Black.copy(alpha = 0.7f),
-                                contentColor = Color.White,
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    Icon(Icons.Filled.SkipNext, contentDescription = null, tint = BrandColors.Cyan)
-                                    Text("即將播放下一部…($seconds)")
-                                    TextButton(onClick = { cancelCountdown() }) { Text("取消", color = BrandColors.Cyan) }
-                                }
-                            }
-                        }
 
                         // 這裡同時處在 Box 和外層 Column 的作用域裡,BoxScope/ColumnScope 都各自有一份
                         // 簽章相同的 AnimatedVisibility 擴充函式,implicit receiver 沒辦法自動判斷要用
@@ -550,7 +507,6 @@ fun VideoPlayerScreen(
                                     showControls()
                                     autoplayNext = checked
                                     scope.launch { prefs.setAutoplayNext(checked) }
-                                    if (!checked) cancelCountdown()
                                 },
                                 shuffle = shuffle,
                                 onShuffleChange = { checked ->

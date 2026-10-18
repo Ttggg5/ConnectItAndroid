@@ -22,7 +22,7 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
   Media3(ExoPlayer)播放 `GET /media/{path}`(原生支援 HTTP Range,可以拖曳進度)。控制列整組
   自己刻(而不是用 PlayerView 內建的),對應 Windows 觀看頁 BuildWatchPageScript 的功能:
   排序(檔名/大小/修改時間、遞增遞減)、上一部/下一部、快轉倒轉 10 秒、播放速度、音量、
-  自動播放下一部(含可取消的倒數提示)、記住播放進度/音量/速度(`PlaybackPreferences`,對應
+  自動播放下一部(播完直接接下一部)、記住播放進度/音量/速度(`PlaybackPreferences`,對應
   網頁版的 `localStorage`)、全螢幕(強制橫向 + 隱藏系統列)。
   **為什麼不用 WebView 直接開伺服器端網頁**:試過內嵌 WebView 直接開網頁(不用自己刻清單/
   播放器),但 WebView 內嵌在 Compose 的 `AndroidView` 裡播放 `<video>` 時有相容性問題——聲音
@@ -37,7 +37,7 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
 - **遙控模式**:主機端遙控畫面(`ui/screens/VideoHostControlScreen.kt`,TV 版
   `ui/tv/TvVideoHostControlScreen.kt`)把指令寫進 `video/PlaybackControlState.kt`(碼表模型),
   觀看端透過 `/control/events` 同步。遙控畫面有自己的排序/隨機播放/自動播放下一部設定,
-  自動播放的倒數由 `ConnectItService` 負責,離開遙控畫面也照樣會接下一部。
+  自動播放下一部由 `ConnectItService` 負責,離開遙控畫面也照樣會接下一部。
 
 ## 專案結構
 
@@ -68,6 +68,8 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
 - **裝置頁**:「這台裝置」可以點筆形圖示直接改名;已連線時「目前連線」卡片出現在裝置清單上方
   (平板/折疊機攤開時在右側),包含傳送檔案/資料夾、傳輸進度、接收完成後「開啟檔案」、這次連線的傳輸紀錄。
 - **連線流程**:按下連線後顯示可取消的「等待對方接受」對話框;被拒絕、沒回應、連不到時分別說明原因。
+- **傳輸進度與通知**:傳輸卡片顯示百分比、傳輸速度與預計剩餘時間;通知列有即時進度條,完成或失敗時跳出通知。
+- **異常斷線偵測**:連線期間雙方每 4 秒互送心跳(跟 Windows 端同一套),對方沒有正常關閉連線就消失時,約 15 秒內就會判定斷線並通知。
 - **從其他 App 分享**:在相簿或檔案管理員按「分享」→ ConnectIt,選一台裝置就會傳送(還沒連線的話會先送出連線請求,對方接受後自動開始傳送)。
 - **影片頁**:分成「觀看」(含「繼續觀看」,記住最近看到一半的影片,伺服器重新上線時直接從上次的位置繼續)
   與「分享」(顯示網址與 QR Code,沒有安裝 App 的裝置用瀏覽器就能觀看)兩個分頁。
@@ -91,7 +93,7 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
   (Storage Access Framework)選任意資料夾(見 `util/DownloadStorage.kt` 的 `createViaSafTree`)。
 - **進階**(預設收合):監聽連接埠(留空 = 系統自動指派;變更需要重啟 App 才會生效)與主動連線的逾時秒數。
 - **影片伺服器**:對應 Windows 端 `VideoServerSettingsService`——下次按「選擇資料夾開始分享」時
-  套用的預設值:清單排序方式、自動播放下一部(含倒數秒數)、隨機播放、預設音量/速度,以及掃描資料夾時
+  套用的預設值:清單排序方式、自動播放下一部、隨機播放、預設音量/速度,以及掃描資料夾時
   額外要當作影片的副檔名(內建清單以外)。只影響下一次開始分享套用的初始值,不會在伺服器執行
   中即時生效。遙控畫面的排序/隨機播放/自動播放下一部也以這些值為初始值,但在遙控畫面上的調整
   只影響當次分享,不會寫回設定。

@@ -40,7 +40,6 @@ data class AppSettings(
     val videoDefaultSort: String = VideoSort.DEFAULT_VALUE,
     val videoAutoplayNext: Boolean = VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_NEXT,
     val videoShuffle: Boolean = VideoServerPlaybackOptions.DEFAULT_SHUFFLE,
-    val videoAutoplayCountdownSeconds: Int = VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS,
     val videoDefaultVolumePercent: Int = VideoServerPlaybackOptions.DEFAULT_VOLUME_PERCENT,
     val videoDefaultSpeed: Double = VideoServerPlaybackOptions.DEFAULT_PLAYBACK_SPEED,
     /** 使用者額外加入的副檔名(內建清單以外),已正規化成小寫、不含開頭 '.'、不重複。 */
@@ -78,7 +77,6 @@ class SettingsRepository(private val context: Context) {
         val VIDEO_DEFAULT_SORT = stringPreferencesKey("video_default_sort")
         val VIDEO_AUTOPLAY_NEXT = booleanPreferencesKey("video_autoplay_next")
         val VIDEO_SHUFFLE = booleanPreferencesKey("video_shuffle")
-        val VIDEO_AUTOPLAY_COUNTDOWN_SECONDS = intPreferencesKey("video_autoplay_countdown_seconds")
         val VIDEO_DEFAULT_VOLUME_PERCENT = intPreferencesKey("video_default_volume_percent")
         val VIDEO_DEFAULT_SPEED = doublePreferencesKey("video_default_speed")
         val VIDEO_EXTRA_EXTENSIONS = stringPreferencesKey("video_extra_extensions")
@@ -100,9 +98,6 @@ class SettingsRepository(private val context: Context) {
                 ?: VideoSort.DEFAULT_VALUE,
             videoAutoplayNext = prefs[Keys.VIDEO_AUTOPLAY_NEXT] ?: VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_NEXT,
             videoShuffle = prefs[Keys.VIDEO_SHUFFLE] ?: VideoServerPlaybackOptions.DEFAULT_SHUFFLE,
-            videoAutoplayCountdownSeconds = (prefs[Keys.VIDEO_AUTOPLAY_COUNTDOWN_SECONDS]
-                ?: VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS)
-                .coerceIn(VideoServerPlaybackOptions.MIN_AUTOPLAY_COUNTDOWN_SECONDS, VideoServerPlaybackOptions.MAX_AUTOPLAY_COUNTDOWN_SECONDS),
             videoDefaultVolumePercent = (prefs[Keys.VIDEO_DEFAULT_VOLUME_PERCENT] ?: VideoServerPlaybackOptions.DEFAULT_VOLUME_PERCENT)
                 .coerceIn(0, 100),
             videoDefaultSpeed = prefs[Keys.VIDEO_DEFAULT_SPEED]?.takeIf { VideoServerPlaybackOptions.VALID_PLAYBACK_SPEEDS.contains(it) }
@@ -168,13 +163,6 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setVideoShuffle(enabled: Boolean) {
         context.dataStore.edit { it[Keys.VIDEO_SHUFFLE] = enabled }
-    }
-
-    suspend fun setVideoAutoplayCountdownSeconds(seconds: Int) {
-        val clamped = seconds.coerceIn(
-            VideoServerPlaybackOptions.MIN_AUTOPLAY_COUNTDOWN_SECONDS, VideoServerPlaybackOptions.MAX_AUTOPLAY_COUNTDOWN_SECONDS,
-        )
-        context.dataStore.edit { it[Keys.VIDEO_AUTOPLAY_COUNTDOWN_SECONDS] = clamped }
     }
 
     suspend fun setVideoDefaultVolumePercent(percent: Int) {

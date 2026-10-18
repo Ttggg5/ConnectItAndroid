@@ -75,7 +75,6 @@ fun TvVideoHostControlScreen(service: ConnectItService, onBack: () -> Unit) {
 
     val hostState by service.videoHostState.collectAsState()
     val playlistSettings by service.remotePlaylist.collectAsState()
-    val autoplayCountdown by service.remoteAutoplayCountdown.collectAsState()
     var snapshot by remember { mutableStateOf(service.currentPlaybackSnapshot()) }
     var durationMs by remember { mutableStateOf<Long?>(null) }
 
@@ -234,16 +233,6 @@ fun TvVideoHostControlScreen(service: ConnectItService, onBack: () -> Unit) {
                             onClick = { service.remoteControlSetAutoplayNext(!playlistSettings.autoplayNext) },
                             leadingIcon = { Icon(Icons.AutoMirrored.Filled.PlaylistPlay, contentDescription = null) },
                         ) { Text("自動播放下一部") }
-                    }
-
-                    autoplayCountdown?.let { countdown ->
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Text(
-                                "即將播放下一部:${countdown.nextName}(${countdown.secondsLeft})",
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                            OutlinedButton(onClick = { service.remoteControlCancelAutoplay() }) { Text("取消") }
-                        }
                     }
                 }
             }

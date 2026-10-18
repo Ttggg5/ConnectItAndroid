@@ -85,7 +85,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 private val SkipDurationMs = 10_000L
-private val AutoplayCountdownSeconds = 5
 private val SpeedOptions = listOf(0.5f, 1f, 1.25f, 1.5f, 2f)
 
 /**
@@ -122,8 +121,6 @@ fun TvVideoPlayerScreen(
     var volume by remember { mutableStateOf(1f) }
     var speed by remember { mutableStateOf(1f) }
     var autoplayNext by remember { mutableStateOf(true) }
-    var countdownSeconds by remember { mutableStateOf<Int?>(null) }
-    var countdownJob by remember { mutableStateOf<Job?>(null) }
 
     // 遠端控制模式:主機正在控制播放時鎖住手動控制列,改成跟隨輪詢到的狀態播放——跟手機版
     // VideoPlayerScreen 是同一套輪詢邏輯(見下方對 fetchControlState 的說明)。
@@ -149,15 +146,9 @@ fun TvVideoPlayerScreen(
 
     fun videoKey(entry: VideoManifestEntry) = "${server.host}:${server.port}/${entry.relativePath}"
 
-    fun cancelCountdown() {
-        countdownJob?.cancel()
-        countdownJob = null
-        countdownSeconds = null
-    }
 
     fun playIndex(index: Int) {
         if (index !in entries.indices) return
-        cancelCountdown()
         currentIndex = index
         val entry = entries[index]
         val mediaItem = MediaItem.Builder()
@@ -177,20 +168,6 @@ fun TvVideoPlayerScreen(
         }
     }
 
-    fun startAutoplayCountdown(nextIndex: Int) {
-        countdownJob?.cancel()
-        countdownJob = scope.launch {
-            var remaining = AutoplayCountdownSeconds
-            countdownSeconds = remaining
-            while (remaining > 0) {
-                delay(1000)
-                remaining--
-                countdownSeconds = remaining
-            }
-            countdownSeconds = null
-            playIndex(nextIndex)
-        }
-    }
 
     fun togglePlayPause() {
         if (exoPlayer.playbackState == Player.STATE_ENDED) {
@@ -230,7 +207,7 @@ fun TvVideoPlayerScreen(
                     recentlyWatched.remove(server.displayName, finished.relativePath)
                     val nextIndex = currentIndex + 1
                     // 遠端控制中由主機決定要不要/切到哪一部,觀看端不自己倒數跳下一部。
-                    if (autoplayNext && !remoteEnabled && nextIndex in entries.indices) startAutoplayCountdown(nextIndex)
+                    if (autoplayNext && !remoteEnabled && nextIndex in entries.indices) scope.launch { playIndex(nextIndex) }
                 }
             }
         }
@@ -346,18 +323,6 @@ fun TvVideoPlayerScreen(
             },
         )
 
-        countdownSeconds?.let { seconds ->
-            Surface(modifier = Modifier.align(Alignment.BottomEnd).padding(end = 24.dp, bottom = 140.dp)) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Text("即將播放下一部…($seconds)")
-                    OutlinedButton(onClick = { cancelCountdown() }) { Text("取消") }
-                }
-            }
-        }
 
         if (remoteEnabled) {
             Surface(modifier = Modifier.align(Alignment.TopCenter).padding(24.dp)) {
@@ -403,7 +368,6 @@ fun TvVideoPlayerScreen(
                         showControls()
                         autoplayNext = !autoplayNext
                         scope.launch { prefs.setAutoplayNext(autoplayNext) }
-                        if (!autoplayNext) cancelCountdown()
                     },
                     muted = volume <= 0f,
                     onToggleMute = {

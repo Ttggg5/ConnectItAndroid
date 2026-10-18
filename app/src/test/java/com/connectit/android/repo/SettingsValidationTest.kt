@@ -34,13 +34,6 @@ class SettingsValidationTest {
     }
 
     @Test
-    fun autoplayCountdown_usesPlaybackOptionsRange() {
-        assertEquals(5, SettingsValidation.validateAutoplayCountdown(" 5 ").value)
-        assertFalse(SettingsValidation.validateAutoplayCountdown("0").isValid)
-        assertFalse(SettingsValidation.validateAutoplayCountdown("31").isValid)
-    }
-
-    @Test
     fun deviceName_rejectsBlankAndTooLong() {
         assertNull(SettingsValidation.validateDeviceName("客廳電視"))
         assertNotNull(SettingsValidation.validateDeviceName("   "))

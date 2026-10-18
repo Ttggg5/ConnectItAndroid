@@ -1,7 +1,5 @@
 package com.connectit.android.repo
 
-import com.connectit.android.video.VideoServerPlaybackOptions
-
 /**
  * 設定頁輸入框的即時驗證(對應 Windows 端 Services/SettingsValidation.cs):輸入當下就判斷是否合法,
  * 合法才自動儲存,不合法就在輸入框下方顯示原因——取代以前每個欄位都要另外按「儲存」、
@@ -19,12 +17,6 @@ object SettingsValidation {
 
     fun validateConnectTimeout(text: String): Result =
         validateRange(text, AppSettings.MIN_CONNECT_TIMEOUT_SECONDS, AppSettings.MAX_CONNECT_TIMEOUT_SECONDS)
-
-    fun validateAutoplayCountdown(text: String): Result = validateRange(
-        text,
-        VideoServerPlaybackOptions.MIN_AUTOPLAY_COUNTDOWN_SECONDS,
-        VideoServerPlaybackOptions.MAX_AUTOPLAY_COUNTDOWN_SECONDS,
-    )
 
     /** 留空代表交由系統自動指派(回傳 0);否則必須是 1024-65535(避開需要特殊權限的特權連接埠)。 */
     fun validatePort(text: String): Result {

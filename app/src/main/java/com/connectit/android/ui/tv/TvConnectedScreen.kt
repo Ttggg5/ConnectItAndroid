@@ -108,6 +108,10 @@ fun TvConnectionPanel(service: ConnectItService, peer: ConnectedPeer) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(state.title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        state.percentText?.let {
+                            Text(it, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(16.dp))
+                        }
                         OutlinedButton(onClick = { service.cancelTransfer() }) { Text("取消") }
                     }
                     GradientProgressBar(progress = state.progress, height = 10.dp)

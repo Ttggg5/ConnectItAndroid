@@ -139,10 +139,6 @@ object VideoHostPages {
         .settings-row.volume-row:hover{background:none;}
         .settings-row.volume-row button{background:none;border:none;color:var(--text);cursor:pointer;padding:4px;display:inline-flex;align-items:center;justify-content:center;}
         .settings-row.volume-row input[type=range]{flex:1;min-width:0;width:auto;}
-        .next-overlay{position:absolute;right:16px;bottom:96px;background:rgba(18,26,46,.95);border:1px solid var(--outline);border-radius:14px;padding:12px 14px;display:flex;align-items:center;gap:12px;box-shadow:0 12px 32px rgba(0,0,0,.55);}
-        .next-overlay[hidden]{display:none;}
-        .next-overlay span{font-size:13px;}
-        .next-overlay button{background:var(--grad);color:#fff;border:none;border-radius:10px;padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;}
 
         .player-wrap.remote-controlled .controls{display:none;}
 
@@ -500,7 +496,6 @@ object VideoHostPages {
         val controlStateJson = controlSnapshot.toJson().toString().replace("</", "<\\/")
         val defaultVolumeJson = options.defaultVolumePercent.toString()
         val defaultSpeedJson = formatSpeedValue(options.defaultSpeed)
-        val autoplayCountdownJson = options.autoplayCountdownSeconds.toString()
 
         return """
             <!doctype html>
@@ -515,10 +510,6 @@ object VideoHostPages {
                   <div class="player-fullscreen-wrap" id="playerFullscreenWrap">
                     <div class="player-wrap" id="playerWrap">
                       <video id="player" src="/media/${escapeRelativePathForUrl(entry.relativePath)}" poster="/thumbnail/${escapeRelativePathForUrl(entry.relativePath)}"></video>
-                      <div class="next-overlay" id="nextOverlay" hidden>
-                        <span id="nextOverlayText"></span>
-                        <button id="cancelNextBtn" type="button">取消</button>
-                      </div>
                       <div class="controls">
                         <div class="progress-row">
                           <input type="range" id="seek" min="0" max="0" step="0.1" value="0">
@@ -560,7 +551,7 @@ object VideoHostPages {
               <script>$BACK_TO_HOME_TRAP_SCRIPT</script>
               <script>${buildWatchPageScript(
                   relativePathJson, prevIndexJson, nextIndexJson, sortJson, extraQueryJson, controlStateJson,
-                  defaultVolumeJson, defaultSpeedJson, autoplayCountdownJson,
+                  defaultVolumeJson, defaultSpeedJson,
               )}</script>
             </body>
             </html>
@@ -603,13 +594,11 @@ object VideoHostPages {
         controlStateJson: String,
         defaultVolumeJson: String,
         defaultSpeedJson: String,
-        autoplayCountdownJson: String,
     ): String = """
         (function () {
           var meta = { relativePath: $relativePathJson, prevIndex: $prevIndexJson, nextIndex: $nextIndexJson, sort: $sortJson, extraQuery: $extraQueryJson };
           var DEFAULT_VOLUME_PERCENT = $defaultVolumeJson;
           var DEFAULT_SPEED = $defaultSpeedJson;
-          var AUTOPLAY_COUNTDOWN_SECONDS = $autoplayCountdownJson;
           function watchUrl(index) { return '/watch?v=' + index + '&sort=' + meta.sort + meta.extraQuery; }
           function watchUrlForPath(path) { return '/watch?path=' + encodeURIComponent(path) + '&sort=' + meta.sort + meta.extraQuery; }
           var ICON_PLAY = '${svg(Icons.PLAY_ARROW)}';
@@ -631,9 +620,6 @@ object VideoHostPages {
           var speed = document.getElementById('speed');
           var fsBtn = document.getElementById('fsBtn');
           var autoplayNext = document.getElementById('autoplayNext');
-          var nextOverlay = document.getElementById('nextOverlay');
-          var nextOverlayText = document.getElementById('nextOverlayText');
-          var cancelNextBtn = document.getElementById('cancelNextBtn');
           var fullscreenWrap = document.getElementById('playerFullscreenWrap');
           var playerWrap = document.getElementById('playerWrap');
           var controls = playerWrap.querySelector('.controls');
@@ -645,7 +631,6 @@ object VideoHostPages {
           var volKey = 'connectit-volume';
           var speedKey = 'connectit-speed';
           var seeking = false;
-          var autoplayTimer = null;
           var hideControlsTimer = null;
 
           function showControls() {
@@ -727,25 +712,10 @@ object VideoHostPages {
           video.addEventListener('ended', function () {
             localStorage.removeItem(posKey);
             // 遙控中換不換下一部由主機決定;觀眾自己跳去下一部只會被伺服器導回主機正在播的那一部,
-            // 然後又從片尾播完、又倒數跳轉,變成一直重新載入的迴圈。
+            // 然後又從片尾播完、又跳轉,變成一直重新載入的迴圈。
             if (remoteEnabled || meta.nextIndex === null || !autoplayNext.checked) { return; }
-
-            var secondsLeft = AUTOPLAY_COUNTDOWN_SECONDS;
-            nextOverlay.hidden = false;
-            nextOverlayText.textContent = '即將播放下一部…(' + secondsLeft + ')';
-            autoplayTimer = setInterval(function () {
-              secondsLeft--;
-              if (secondsLeft <= 0) {
-                clearInterval(autoplayTimer);
-                location.href = watchUrl(meta.nextIndex);
-              } else {
-                nextOverlayText.textContent = '即將播放下一部…(' + secondsLeft + ')';
-              }
-            }, 1000);
-          });
-          cancelNextBtn.addEventListener('click', function () {
-            clearInterval(autoplayTimer);
-            nextOverlay.hidden = true;
+            // 播完直接接下一部,不再倒數。
+            location.href = watchUrl(meta.nextIndex);
           });
 
           playBtn.addEventListener('click', togglePlay);

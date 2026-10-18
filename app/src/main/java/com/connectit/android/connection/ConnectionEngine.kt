@@ -29,6 +29,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
@@ -92,6 +93,15 @@ class ConnectionEngine(
 
     @Volatile private var activeSocket: Socket? = null
     private var monitorJob: Job? = null
+
+    // 心跳(對應 Windows 端 ConnectionService):連線期間每隔 [HEARTBEAT_INTERVAL_MS] 送一個 "ping";
+    // 確認對方也會送心跳之後,超過 [HEARTBEAT_TIMEOUT_MS] 完全沒收到對方任何訊框就判定連線已斷。
+    // 用來偵測對方沒有正常關閉連線就消失(App 被強制關閉、手機斷網、電腦直接關機)——這時沒有 TCP FIN,
+    // 讀取會一直卡住。只在對方也送心跳時才啟用逾時,舊版(不送心跳)的對方不會因為閒置被誤判斷線。
+    private var heartbeatJob: Job? = null
+    @Volatile private var lastReceivedAtMs = 0L
+    @Volatile private var peerSendsHeartbeat = false
+    @Volatile private var heartbeatWriteInFlight = false
     private val writeMutex = Mutex()
 
     /** 組裝訊框用的共用緩衝區,只在持有 [writeMutex] 時使用(見 [writeRaw])。 */
@@ -270,6 +280,8 @@ class ConnectionEngine(
     }
 
     fun disconnect() {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
         monitorJob?.cancel()
         monitorJob = null
         activeSocket?.closeQuietly()
@@ -278,6 +290,7 @@ class ConnectionEngine(
 
     private fun startMonitoring(socket: Socket) {
         monitorJob?.cancel()
+        startHeartbeat(socket)
         monitorJob = scope.launch(Dispatchers.IO) {
             var remoteClosed = false
             try {
@@ -290,6 +303,7 @@ class ConnectionEngine(
                         remoteClosed = true
                         break
                     }
+                    lastReceivedAtMs = SystemClock.elapsedRealtime()
                     when (frame.type) {
                         FrameType.CONTROL -> handleControlFrame(frame.payload)
                         FrameType.CHUNK -> handleChunkFrame(frame.payload)
@@ -301,6 +315,7 @@ class ConnectionEngine(
                 if (isActive) remoteClosed = true
             }
 
+            heartbeatJob?.cancel()
             abortActiveTransfer(TransferEndReason.CONNECTION_CLOSED)
             abortActiveFolderSession(TransferEndReason.CONNECTION_CLOSED)
 
@@ -311,6 +326,38 @@ class ConnectionEngine(
                 activeSocket = null
                 onStatusChanged?.invoke("對方已中斷連線。")
                 onRemoteDisconnected?.invoke()
+            }
+        }
+    }
+
+    private fun startHeartbeat(socket: Socket) {
+        heartbeatJob?.cancel()
+        peerSendsHeartbeat = false
+        lastReceivedAtMs = SystemClock.elapsedRealtime()
+        // 作業系統層級的保險:對方是不送心跳的舊版本時,TCP keepalive 至少能在很久之後發現斷線。
+        runCatching { socket.keepAlive = true }
+
+        heartbeatJob = scope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(HEARTBEAT_INTERVAL_MS)
+                val silentMs = SystemClock.elapsedRealtime() - lastReceivedAtMs
+                if (peerSendsHeartbeat && silentMs > HEARTBEAT_TIMEOUT_MS) {
+                    onStatusChanged?.invoke("超過 ${HEARTBEAT_TIMEOUT_MS / 1000} 秒沒有收到對方的回應,判定連線已中斷。")
+                    // 關掉 socket 讓卡在讀取的監控迴圈丟出例外,走一般的「對方斷線」流程(清理傳輸、通知畫面)。
+                    socket.closeQuietly()
+                    return@launch
+                }
+                // 另外開一個 coroutine 送:對方已經不在時寫入可能卡住,不能擋住上面的逾時判斷。
+                if (!heartbeatWriteInFlight) {
+                    heartbeatWriteInFlight = true
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            writeControl(FileControlMessage(type = HEARTBEAT_TYPE))
+                        } finally {
+                            heartbeatWriteInFlight = false
+                        }
+                    }
+                }
             }
         }
     }
@@ -625,6 +672,11 @@ class ConnectionEngine(
 
     private suspend fun handleControlFrame(payload: ByteArray) {
         val message = FileControlMessage.parse(payload) ?: return
+        if (message.type == HEARTBEAT_TYPE) {
+            // 心跳不需要回應,收到代表對方支援心跳,之後才啟用逾時判斷。
+            peerSendsHeartbeat = true
+            return
+        }
         if (message.transferId == null) return
 
         when (message.type) {
@@ -1019,6 +1071,9 @@ class ConnectionEngine(
     }
 
     companion object {
+        private const val HEARTBEAT_TYPE = "ping"
+        private const val HEARTBEAT_INTERVAL_MS = 4_000L
+        private const val HEARTBEAT_TIMEOUT_MS = 15_000L
         private val INVALID_FILENAME_CHARS = charArrayOf('/', '\\', ':', '*', '?', '"', '<', '>', '|')
 
         private fun sanitizeFileName(name: String): String {

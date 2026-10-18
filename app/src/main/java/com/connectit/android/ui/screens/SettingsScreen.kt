@@ -304,18 +304,6 @@ fun SettingsScreen(
                     onCheckedChange = { scope.launch { repo.setVideoShuffle(it); videoSaved.bump() } },
                 )
                 SettingsDivider()
-                AutoSaveNumberField(
-                    label = "自動播放前的倒數秒數",
-                    initialValue = settings.videoAutoplayCountdownSeconds.toString(),
-                    validate = SettingsValidation::validateAutoplayCountdown,
-                    onSave = { seconds ->
-                        if (seconds != settings.videoAutoplayCountdownSeconds) {
-                            scope.launch { repo.setVideoAutoplayCountdownSeconds(seconds); videoSaved.bump() }
-                        }
-                    },
-                    supportingText = "1–30 秒",
-                    modifier = Modifier.padding(top = 10.dp),
-                )
 
                 // 拖曳中只更新畫面上的數字,放開才寫入,不用每一格都存一次。
                 var volumeDraft by remember { mutableFloatStateOf(settings.videoDefaultVolumePercent.toFloat()) }

@@ -95,7 +95,6 @@ import com.connectit.android.ui.theme.BrandColors
 import coil.compose.AsyncImage
 import com.connectit.android.net.videoThumbnailUrl
 import com.connectit.android.service.ConnectItService
-import com.connectit.android.service.RemoteAutoplayCountdown
 import com.connectit.android.service.RemotePlaylistSettings
 import com.connectit.android.service.VideoHostUiState
 import com.connectit.android.ui.components.AdaptiveContentWidth
@@ -127,7 +126,6 @@ fun VideoHostControlScreen(service: ConnectItService, onBack: () -> Unit) {
 
     val hostState by service.videoHostState.collectAsState()
     val playlistSettings by service.remotePlaylist.collectAsState()
-    val autoplayCountdown by service.remoteAutoplayCountdown.collectAsState()
     var snapshot by remember { mutableStateOf(service.currentPlaybackSnapshot()) }
     var durationMs by remember { mutableStateOf<Long?>(null) }
 
@@ -201,7 +199,6 @@ fun VideoHostControlScreen(service: ConnectItService, onBack: () -> Unit) {
                         hasPrevious = currentIndex > 0,
                         hasNext = currentIndex in 0 until entries.size - 1,
                         port = running.port,
-                        autoplayCountdown = autoplayCountdown,
                         refresh = refresh,
                     )
                     val playlistControls: @Composable () -> Unit = {
@@ -271,7 +268,6 @@ private class HostControls(
     val hasPrevious: Boolean,
     val hasNext: Boolean,
     val port: Int,
-    val autoplayCountdown: RemoteAutoplayCountdown?,
     val refresh: () -> Unit,
 )
 
@@ -575,9 +571,6 @@ private fun ControlPanel(controls: HostControls, compact: Boolean) {
             }
         }
 
-        controls.autoplayCountdown?.let { countdown ->
-            AutoplayCountdownBanner(countdown, onCancel = { service.remoteControlCancelAutoplay() })
-        }
 
         // 主要播放按鈕
         Row(
@@ -685,27 +678,6 @@ private fun PlaylistOptions(service: ConnectItService, settings: RemotePlaylistS
     }
 }
 
-@Composable
-private fun AutoplayCountdownBanner(countdown: RemoteAutoplayCountdown, onCancel: () -> Unit) {
-    Surface(
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(Modifier.padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "即將播放下一部:${countdown.nextName}(${countdown.secondsLeft})",
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = onCancel) { Text("取消") }
-        }
-    }
-}
-
-/** 提醒主持人「現在觀看端都被鎖定、跟著這裡同步」,避免忘了遙控模式還開著。 */
 @Composable
 private fun SyncStatusLabel() {
     Row(verticalAlignment = Alignment.CenterVertically) {

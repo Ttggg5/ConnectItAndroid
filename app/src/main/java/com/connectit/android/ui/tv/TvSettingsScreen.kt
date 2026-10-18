@@ -65,8 +65,6 @@ fun TvSettingsScreen(service: ConnectItService) {
     var timeoutText by remember { mutableStateOf(settings.connectTimeoutSeconds.toString()) }
     LaunchedEffect(settings.connectTimeoutSeconds) { timeoutText = settings.connectTimeoutSeconds.toString() }
 
-    var autoplayCountdownText by remember { mutableStateOf(settings.videoAutoplayCountdownSeconds.toString()) }
-    LaunchedEffect(settings.videoAutoplayCountdownSeconds) { autoplayCountdownText = settings.videoAutoplayCountdownSeconds.toString() }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -203,18 +201,6 @@ fun TvSettingsScreen(service: ConnectItService) {
                 onCheckedChange = { scope.launch { service.settingsRepository.setVideoShuffle(it) } },
             )
 
-            TvOutlinedTextField(
-                value = autoplayCountdownText,
-                onValueChange = { text -> if (text.all { it.isDigit() } && text.length <= 2) autoplayCountdownText = text },
-                label = "自動播放倒數秒數(1-30)",
-            )
-            OutlinedButton(onClick = {
-                scope.launch {
-                    service.settingsRepository.setVideoAutoplayCountdownSeconds(
-                        autoplayCountdownText.toIntOrNull() ?: VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS,
-                    )
-                }
-            }) { Text("儲存倒數秒數") }
 
             Text("預設音量:${settings.videoDefaultVolumePercent}%", style = MaterialTheme.typography.bodySmall)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {

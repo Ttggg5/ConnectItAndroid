@@ -11,7 +11,6 @@ data class VideoServerPlaybackOptions(
     val shuffle: Boolean = DEFAULT_SHUFFLE,
     val defaultVolumePercent: Int = DEFAULT_VOLUME_PERCENT,
     val defaultSpeed: Double = DEFAULT_PLAYBACK_SPEED,
-    val autoplayCountdownSeconds: Int = DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS,
     val extraExtensions: List<String> = emptyList(),
 ) {
     companion object {
@@ -19,9 +18,6 @@ data class VideoServerPlaybackOptions(
         const val DEFAULT_SHUFFLE = false
         const val DEFAULT_VOLUME_PERCENT = 100
         const val DEFAULT_PLAYBACK_SPEED = 1.0
-        const val DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS = 5
-        const val MIN_AUTOPLAY_COUNTDOWN_SECONDS = 1
-        const val MAX_AUTOPLAY_COUNTDOWN_SECONDS = 30
 
         // 跟 Windows 端 VideoServerSettingsService.ValidPlaybackSpeeds 保持一致。
         val VALID_PLAYBACK_SPEEDS = listOf(0.5, 1.0, 1.25, 1.5, 2.0)

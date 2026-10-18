@@ -40,6 +40,7 @@ import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.repo.SettingsRepository
 import com.connectit.android.util.DownloadStorage
 import com.connectit.android.util.NetworkUtils
+import com.connectit.android.util.TransferRateTracker
 import com.connectit.android.util.SafUtils
 import com.connectit.android.video.HostManifestEntry
 import com.connectit.android.video.PlaybackControlState
@@ -60,6 +61,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.ceil
@@ -92,13 +94,13 @@ data class RemotePlaylistSettings(
     val autoplayNext: Boolean = VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_NEXT,
 )
 
-/** 遙控模式下目前這部播完、正在倒數準備切到下一部時的狀態,供遙控畫面顯示倒數與「取消」。 */
-data class RemoteAutoplayCountdown(val nextRelativePath: String, val nextName: String, val secondsLeft: Int)
 
 data class TransferUiState(
     val title: String,
     val statusText: String,
     val progress: Float,
+    /** 「45%」這種百分比文字,還沒開始傳(等待對方接受)時為 null。 */
+    val percentText: String? = null,
 )
 
 /**
@@ -159,14 +161,9 @@ class ConnectItService : LifecycleService() {
     private val _remotePlaylist = MutableStateFlow(RemotePlaylistSettings())
     val remotePlaylist: StateFlow<RemotePlaylistSettings> = _remotePlaylist.asStateFlow()
 
-    private val _remoteAutoplayCountdown = MutableStateFlow<RemoteAutoplayCountdown?>(null)
-    val remoteAutoplayCountdown: StateFlow<RemoteAutoplayCountdown?> = _remoteAutoplayCountdown.asStateFlow()
-
     // 自動播放下一部:主機端不一定真的在播放影片,所以「播完了」是由這個迴圈定期檢查碼表外插的位置
     // 有沒有走到片尾(見 checkRemoteAutoplay)。放在服務裡而不是遙控畫面,離開遙控畫面也照樣會接下一部。
     private var remoteAutoplayWatcher: Job? = null
-    private var remoteAutoplayCountdownSeconds = VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_COUNTDOWN_SECONDS
-    private var remoteAutoplayDeadline = 0L
 
     private val _connectionState = MutableStateFlow<ConnectionUiState>(ConnectionUiState.Idle)
     val connectionState: StateFlow<ConnectionUiState> = _connectionState.asStateFlow()
@@ -190,6 +187,9 @@ class ConnectItService : LifecycleService() {
     val transferHistory: StateFlow<List<TransferRecord>> = _transferHistory.asStateFlow()
 
     /** 剛接收完成、可以直接開啟的項目:傳輸卡片會切成「完成」狀態顯示「開啟」按鈕,直到使用者關閉或開始下一個傳輸。 */
+    private val transferRate = TransferRateTracker()
+    private var lastProgressNotificationAt = 0L
+
     private val _completedTransfer = MutableStateFlow<TransferRecord?>(null)
     val completedTransfer: StateFlow<TransferRecord?> = _completedTransfer.asStateFlow()
 
@@ -355,6 +355,7 @@ class ConnectItService : LifecycleService() {
             return
         }
         _completedTransfer.value = null
+        transferRate.reset()
         _transferState.value = TransferUiState(name, "等待對方接受...", 0f)
         connectionEngine.sendFile(uri, name, size)
     }
@@ -367,6 +368,7 @@ class ConnectItService : LifecycleService() {
         }
         val title = if (files.size == 1) files[0].second else "${files.size} 個檔案"
         _completedTransfer.value = null
+        transferRate.reset()
         _transferState.value = TransferUiState(title, "等待對方接受...", 0f)
         connectionEngine.sendFiles(files)
     }
@@ -377,6 +379,7 @@ class ConnectItService : LifecycleService() {
             return
         }
         _completedTransfer.value = null
+        transferRate.reset()
         _transferState.value = TransferUiState(folderName, "等待對方接受...", 0f)
         connectionEngine.sendFolder(folderName, entries)
     }
@@ -394,7 +397,6 @@ class ConnectItService : LifecycleService() {
                 shuffle = cachedSettings.videoShuffle,
                 defaultVolumePercent = cachedSettings.videoDefaultVolumePercent,
                 defaultSpeed = cachedSettings.videoDefaultSpeed,
-                autoplayCountdownSeconds = cachedSettings.videoAutoplayCountdownSeconds,
                 extraExtensions = cachedSettings.videoExtraExtensions,
             )
             val started = videoHostServer.start(treeUri, name, options)
@@ -414,8 +416,6 @@ class ConnectItService : LifecycleService() {
                     shuffleSeed = Random.nextInt(),
                     autoplayNext = options.autoplayNext,
                 )
-                remoteAutoplayCountdownSeconds = options.autoplayCountdownSeconds
-                remoteControlCancelAutoplay()
                 startRemoteAutoplayWatcher()
             } else {
                 _videoHostState.value = VideoHostUiState.Idle
@@ -427,7 +427,6 @@ class ConnectItService : LifecycleService() {
     fun stopVideoServer() {
         remoteAutoplayWatcher?.cancel()
         remoteAutoplayWatcher = null
-        remoteControlCancelAutoplay()
         videoDiscovery.stopAdvertising()
         videoHostServer.stop()
         _videoHostState.value = VideoHostUiState.Idle
@@ -447,13 +446,11 @@ class ConnectItService : LifecycleService() {
     fun currentPlaybackSnapshot(): PlaybackControlState.Snapshot = playbackControlState.snapshot()
 
     fun setRemoteControlEnabled(enabled: Boolean) {
-        remoteControlCancelAutoplay()
         playbackControlState.setEnabled(enabled)
         _playbackState.value = playbackControlState.snapshot()
     }
 
     fun remoteControlPlayVideo(relativePath: String) {
-        remoteControlCancelAutoplay()
         playbackControlState.setVideo(relativePath)
         _playbackState.value = playbackControlState.snapshot()
         // 讓外插的播放位置停在片尾:不知道長度的話,主機這邊的「碼表」在影片播完後還會一直往後跑,
@@ -466,13 +463,11 @@ class ConnectItService : LifecycleService() {
     }
 
     fun remoteControlSetPlaying(playing: Boolean) {
-        remoteControlCancelAutoplay()
         playbackControlState.setPlaying(playing)
         _playbackState.value = playbackControlState.snapshot()
     }
 
     fun remoteControlSeek(positionMs: Long) {
-        remoteControlCancelAutoplay()
         playbackControlState.seek(positionMs)
         _playbackState.value = playbackControlState.snapshot()
     }
@@ -517,11 +512,6 @@ class ConnectItService : LifecycleService() {
 
     fun remoteControlSetAutoplayNext(enabled: Boolean) {
         _remotePlaylist.update { it.copy(autoplayNext = enabled) }
-        if (!enabled) remoteControlCancelAutoplay()
-    }
-
-    fun remoteControlCancelAutoplay() {
-        _remoteAutoplayCountdown.value = null
     }
 
     /** 目前選片在播放清單裡往前/往後 [delta] 格的影片;還沒選片時從第一部開始,超出範圍回傳 null。 */
@@ -544,29 +534,17 @@ class ConnectItService : LifecycleService() {
     }
 
     /**
-     * 遙控模式下目前選片播到片尾時(總長度探測結果見 [remoteControlPlayVideo]),先把狀態定在片尾、
-     * 改成暫停([PlaybackControlState.stopIfReachedEnd]),開了自動播放而且清單還有下一部就開始倒數,
-     * 倒數結束才切過去。總長度探測失敗時無從判斷播完了沒有,這種影片就不會自動接下一部。
+     * 遙控模式下目前選片播到片尾時(總長度探測結果見 [remoteControlPlayVideo]),開了自動播放而且清單還有
+     * 下一部就直接切過去;否則把狀態定在片尾、改成暫停([PlaybackControlState.stopIfReachedEnd])。
+     * 總長度探測失敗時無從判斷播完了沒有,這種影片就不會自動接下一部。
      */
     private fun checkRemoteAutoplay() {
-        val countdown = _remoteAutoplayCountdown.value
-        if (countdown != null) {
-            val secondsLeft = ceil((remoteAutoplayDeadline - SystemClock.elapsedRealtime()) / 1000.0).toInt()
-            if (secondsLeft <= 0) {
-                remoteControlPlayVideo(countdown.nextRelativePath)
-            } else if (secondsLeft != countdown.secondsLeft) {
-                _remoteAutoplayCountdown.value = countdown.copy(secondsLeft = secondsLeft)
-            }
-            return
-        }
-
         if (!playbackControlState.snapshot().enabled || !playbackControlState.stopIfReachedEnd()) return
         _playbackState.value = playbackControlState.snapshot()
 
         if (!_remotePlaylist.value.autoplayNext) return
         val next = remoteNeighborEntry(1) ?: return
-        remoteAutoplayDeadline = SystemClock.elapsedRealtime() + remoteAutoplayCountdownSeconds * 1000L
-        _remoteAutoplayCountdown.value = RemoteAutoplayCountdown(next.relativePath, next.name, remoteAutoplayCountdownSeconds)
+        remoteControlPlayVideo(next.relativePath)
     }
 
     // ===================== 內部事件轉接 =====================
@@ -632,6 +610,7 @@ class ConnectItService : LifecycleService() {
         connectionEngine.onFileOffered = { offer ->
             connectionEngine.respondToFileOffer(offer.transferId, true)
             _completedTransfer.value = null
+            transferRate.reset()
             _transferState.value = TransferUiState(offer.fileName, "接收中...", 0f)
             notifyIncomingTransfer(offer.fileName)
         }
@@ -639,32 +618,33 @@ class ConnectItService : LifecycleService() {
             connectionEngine.respondToFolderOffer(offer.transferId, true)
             _completedTransfer.value = null
             val title = if (offer.isBatch) "${offer.totalEntries} 個檔案" else offer.folderName
+            transferRate.reset()
             _transferState.value = TransferUiState(title, "接收中...(共 ${offer.totalEntries} 個檔案)", 0f)
             notifyIncomingTransfer(title)
         }
 
         connectionEngine.onFileTransferProgress = { p ->
-            _transferState.update { current ->
+            // 資料夾/多檔案傳輸以整批的累計位元組計算,百分比、速度、剩餘時間才是「整個傳輸」的。
+            val isFolder = p.folderTransferId != null && p.totalEntries != null
+            val transferred = if (isFolder) p.folderBytesTransferred ?: p.bytesTransferred else p.bytesTransferred
+            val total = if (isFolder) p.folderTotalBytes ?: p.totalBytes else p.totalBytes
+            val snapshot = transferRate.update(transferred, total)
+            val fraction = if (total > 0) snapshot.fraction.toFloat() else 1f
+            val percentText = "${(fraction * 100).toInt()}%"
+            val bytesText = "${formatBytes(transferred)} / ${formatBytes(total)}・${snapshot.rateText}"
+
+            val state = _transferState.updateAndGet { current ->
                 val title = current?.title ?: (p.fileName ?: "傳輸中")
-                if (p.folderTransferId != null && p.totalEntries != null) {
-                    val transferred = p.folderBytesTransferred ?: p.bytesTransferred
-                    val total = p.folderTotalBytes ?: p.totalBytes
-                    val fraction = if (total > 0) transferred.toFloat() / total else 1f
-                    TransferUiState(
-                        title,
-                        "第 ${p.entryIndex}/${p.totalEntries} 個檔案:${p.fileName}(${formatBytes(transferred)} / ${formatBytes(total)})",
-                        fraction,
-                    )
-                } else {
-                    val fraction = if (p.totalBytes > 0) p.bytesTransferred.toFloat() / p.totalBytes else 1f
-                    TransferUiState(title, "${formatBytes(p.bytesTransferred)} / ${formatBytes(p.totalBytes)}", fraction)
-                }
+                val status = if (isFolder) "第 ${p.entryIndex}/${p.totalEntries} 個檔案:${p.fileName}\n$bytesText" else bytesText
+                TransferUiState(title, status, fraction, percentText)
             }
+            state?.let { notifyTransferProgress(it, p.direction, percentText, snapshot.rateText) }
         }
 
         connectionEngine.onFileTransferEnded = { ended ->
             _transferState.value = null
             clearIncomingTransferNotification()
+            notifyTransferEnded(ended.reason, formatFileEndedMessage(ended))
             recordTransfer(
                 TransferRecord(ended.direction, ended.reason, ended.fileName, isFolder = false, savedUri = ended.savedUri)
             )
@@ -674,6 +654,7 @@ class ConnectItService : LifecycleService() {
         connectionEngine.onFolderTransferEnded = { ended ->
             _transferState.value = null
             clearIncomingTransferNotification()
+            notifyTransferEnded(ended.reason, formatFolderEndedMessage(ended))
             recordTransfer(
                 TransferRecord(
                     ended.direction, ended.reason,
@@ -834,6 +815,50 @@ class ConnectItService : LifecycleService() {
 
     private fun clearIncomingTransferNotification() {
         NotificationManagerCompat.from(this).cancel(TRANSFER_NOTIFICATION_ID)
+        NotificationManagerCompat.from(this).cancel(TRANSFER_PROGRESS_NOTIFICATION_ID)
+    }
+
+    /**
+     * 傳輸中的進度通知(百分比 + 速度 + 剩餘時間 + 進度條)。用低重要性的常駐頻道,只更新內容、不會每次都
+     * 跳出來響一聲;更新頻率限制在每 [PROGRESS_NOTIFICATION_INTERVAL_MS] 一次,避免被系統限流。
+     */
+    private fun notifyTransferProgress(state: TransferUiState, direction: TransferDirection, percentText: String, rateText: String) {
+        if (!cachedSettings.notificationsEnabled) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastProgressNotificationAt < PROGRESS_NOTIFICATION_INTERVAL_MS && state.progress < 1f) return
+        lastProgressNotificationAt = now
+
+        val verb = if (direction == TransferDirection.RECEIVING) "接收中" else "傳送中"
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("$verb:${state.title}")
+            .setContentText("$percentText・$rateText")
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(mainActivityIntent())
+            .setProgress(100, (state.progress * 100).toInt(), false)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .build()
+        postAlertNotification(TRANSFER_PROGRESS_NOTIFICATION_ID, notification)
+    }
+
+    /** 傳輸結束時通知結果(完成/失敗/對方取消),使用者自己按取消的不另外通知。 */
+    private fun notifyTransferEnded(reason: TransferEndReason, message: String) {
+        NotificationManagerCompat.from(this).cancel(TRANSFER_PROGRESS_NOTIFICATION_ID)
+        if (!cachedSettings.notificationsEnabled || reason == TransferEndReason.CANCELLED) return
+
+        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setContentTitle(if (reason == TransferEndReason.COMPLETED) "傳輸完成" else "傳輸未完成")
+            .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(mainActivityIntent())
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        postAlertNotification(TRANSFER_NOTIFICATION_ID, notification)
     }
 
     /** 連線交握完成時呼叫(不論是發起方還是被連線方),讓使用者(尤其是 App 在背景時)知道連線已經建立。 */
@@ -903,5 +928,7 @@ class ConnectItService : LifecycleService() {
         private const val CONNECTION_REQUEST_NOTIFICATION_ID = 4
         private const val CONNECTED_NOTIFICATION_ID = 5
         private const val MAX_TRANSFER_HISTORY = 50
+        private const val TRANSFER_PROGRESS_NOTIFICATION_ID = 6
+        private const val PROGRESS_NOTIFICATION_INTERVAL_MS = 500L
     }
 }
