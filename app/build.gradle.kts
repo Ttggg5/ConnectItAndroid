@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,25 +14,37 @@ android {
         applicationId = "com.connectit.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // CI 每次建置的編號遞增,新下載的 APK 版本號一定比已安裝的大,系統才會當成「更新」;本機建置維持 1。
+        val ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+        versionCode = ciRunNumber ?: 1
+        versionName = if (ciRunNumber != null) "1.0.$ciRunNumber" else "1.0"
     }
 
-    // Release 簽章從環境變數讀取(CI 由 GitHub Secrets 提供),沒設定時退回 debug key,
-    // 讓 release APK 至少還能安裝測試。
-    val releaseKeystore = System.getenv("RELEASE_KEYSTORE_PATH")?.let { file(it) }?.takeIf { it.exists() }
+    // 固定的簽章金鑰:CI 從 GitHub Secrets 解出 keystore(RELEASE_* 環境變數),本機則讀專案根目錄的
+    // keystore.properties(已加入 .gitignore,不會進版控)。debug 與 release 都用同一把金鑰簽,
+    // 這樣不管從 GitHub 下載哪一個 APK,都能直接覆蓋安裝(更新)先前裝的版本,不用先解除安裝。
+    // 兩邊都沒有設定時才退回 Android 預設的 debug key(每台電腦/每次 CI 都不同,無法互相覆蓋安裝)。
+    val keystoreProperties = Properties().apply {
+        val file = rootProject.file("keystore.properties")
+        if (file.exists()) file.inputStream().use { load(it) }
+    }
+    val releaseKeystore = (System.getenv("RELEASE_KEYSTORE_PATH") ?: keystoreProperties.getProperty("storeFile"))
+        ?.let { file(it) }?.takeIf { it.exists() }
     signingConfigs {
         if (releaseKeystore != null) {
             create("release") {
                 storeFile = releaseKeystore
-                storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
-                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+                storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD") ?: keystoreProperties.getProperty("storePassword")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS") ?: keystoreProperties.getProperty("keyAlias")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD") ?: keystoreProperties.getProperty("keyPassword")
             }
         }
     }
 
     buildTypes {
+        debug {
+            signingConfigs.findByName("release")?.let { signingConfig = it }
+        }
         release {
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             // R8 對 Compose 的執行效能影響很大(未最佳化的 Compose 捲動、重組都明顯較慢),
