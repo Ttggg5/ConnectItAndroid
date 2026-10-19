@@ -208,10 +208,15 @@ object VideoHostPages {
     /** 依排序方式,回傳 manifest 項目「顯示順序」的索引清單(內容還是指向原始索引,只是走訪順序不同)。
      * 首頁清單、觀看頁側邊清單、上一部/下一部、主機端遙控畫面都共用同一份排序邏輯。
      * [shuffle] 為真時,在排序結果之上用 [seed] 洗牌一次——同一組 seed 每次重算結果都一樣,讓「隨機播放」
-     * 這一輪瀏覽過程中上一部/下一部順序穩定、不會每次請求都重新洗一次牌(對應 Windows 端 GetDisplayOrder)。 */
-    fun displayOrder(manifest: List<HostManifestEntry>, sort: VideoSort, shuffle: Boolean = false, seed: Int = 0): List<Int> {
+     * 這一輪瀏覽過程中上一部/下一部順序穩定、不會每次請求都重新洗一次牌(對應 Windows 端 GetDisplayOrder)。
+     * [first] 是隨機播放的起點:固定排第一,只洗其餘的——不然起點那部會被洗到隨機位置,洗到最後面就
+     * 播完即停、「下一部」不能按,洗到中間則前面那些永遠輪不到。 */
+    fun displayOrder(manifest: List<HostManifestEntry>, sort: VideoSort, shuffle: Boolean = false, seed: Int = 0, first: Int? = null): List<Int> {
         val ordered = sortedOrder(manifest, sort)
-        return if (shuffle) ordered.shuffled(Random(seed)) else ordered
+        if (!shuffle) return ordered
+        val anchor = first?.takeIf { it in manifest.indices }
+        val rest = (if (anchor == null) ordered else ordered - anchor).shuffled(Random(seed))
+        return if (anchor == null) rest else listOf(anchor) + rest
     }
 
     private fun sortedOrder(manifest: List<HostManifestEntry>, sort: VideoSort): List<Int> {
@@ -332,7 +337,7 @@ object VideoHostPages {
         val indicesJson = org.json.JSONArray(videoIndices).toString()
         val sortJson = org.json.JSONObject.quote(sort.value)
         val extraQueryJson = org.json.JSONObject.quote(extraQuery)
-        return """<a class="flatten-toggle" href="#" onclick='var indices=$indicesJson;var pick=indices[Math.floor(Math.random()*indices.length)];var seed=Math.floor(Math.random()*2147483647);location.href="/watch?v="+pick+"&sort="+$sortJson+"&shuffle=1&seed="+seed+$extraQueryJson;return false;'>隨機播放</a>"""
+        return """<a class="flatten-toggle" href="#" onclick='var indices=$indicesJson;var pick=indices[Math.floor(Math.random()*indices.length)];var seed=Math.floor(Math.random()*2147483647);location.href="/watch?v="+pick+"&sort="+$sortJson+"&shuffle=1&first="+pick+"&seed="+seed+$extraQueryJson;return false;'>隨機播放</a>"""
     }
 
     private fun buildVideoCardsHtml(manifest: List<HostManifestEntry>, indices: List<Int>, sort: VideoSort, extraQuery: String): String =
@@ -389,11 +394,12 @@ object VideoHostPages {
 
     /** 接在 "&sort={sort}" 後面的額外查詢字串——flat=true 帶 "&flat=1",folder 模式底下非根目錄
      * 則帶 "&folder=...",shuffle 開啟則另外帶 "&shuffle=1&seed=...",讓 watch 頁的返回/上一部/下一部/
-     * 側欄連結都能保留目前瀏覽的情境(含是否處於隨機播放狀態)。 */
-    private fun buildExtraQuery(folder: String, flat: Boolean, shuffle: Boolean = false, seed: Int = 0): String {
+     * 側欄連結都能保留目前瀏覽的情境(含是否處於隨機播放狀態;[first] 是這一輪隨機播放的起點,見 [displayOrder])。 */
+    private fun buildExtraQuery(folder: String, flat: Boolean, shuffle: Boolean = false, seed: Int = 0, first: Int? = null): String {
         // Uri.encode 不會編碼單引號,這段查詢字串會被塞進 onclick/onchange 裡的 JS 單引號字串,要另外編掉。
         val query = if (flat) "&flat=1" else if (folder.isEmpty()) "" else "&folder=${Uri.encode(folder).replace("'", "%27")}"
-        return if (shuffle) "$query&shuffle=1&seed=$seed" else query
+        if (!shuffle) return query
+        return if (first == null) "$query&shuffle=1&seed=$seed" else "$query&shuffle=1&first=$first&seed=$seed"
     }
 
     private fun buildHomeSortPrefix(folder: String, flat: Boolean): String {
@@ -446,37 +452,45 @@ object VideoHostPages {
         flat: Boolean = false,
         shuffle: Boolean = false,
         seed: Int = 0,
+        first: Int? = null,
     ): String {
         val entry = manifest[index]
+        // 網址沒帶起點(例如分享設定預設就開隨機播放、直接點首頁的影片卡片)時,以目前這部當起點。
+        val anchor = if (shuffle) first ?: index else null
 
         // 觀看頁的上一部/下一部、右側清單預設只在「目前這個資料夾」裡走(跟首頁逐層瀏覽一致),
         // 只有攤平模式才會照全域排序橫跨所有資料夾——不然使用者會在不知情的狀況下被帶去別的
         // 資料夾。folder 模式下用的還是全域排序,只是先篩選成這個資料夾直屬的影片而已。shuffle
         // 開啟時,displayOrder 回傳的就已經是洗牌過的順序,不用再另外處理。
         val order = if (flat) {
-            displayOrder(manifest, sort, shuffle, seed)
+            displayOrder(manifest, sort, shuffle, seed, anchor)
         } else {
             val folderVideoIndices = getFolderContents(manifest, folder).second.toHashSet()
-            displayOrder(manifest, sort, shuffle, seed).filter { folderVideoIndices.contains(it) }
+            displayOrder(manifest, sort, shuffle, seed, anchor).filter { folderVideoIndices.contains(it) }
         }
         val position = order.indexOf(index)
         val hasPrev = position > 0
         val hasNext = position in 0 until order.size - 1
         val prevIndex = if (hasPrev) order[position - 1] else null
         val nextIndex = if (hasNext) order[position + 1] else null
-        val extraQuery = buildExtraQuery(folder, flat, shuffle, seed)
+        val extraQuery = buildExtraQuery(folder, flat, shuffle, seed, anchor)
 
         // 隨機播放 checkbox 用:關閉時導到的網址(不帶 shuffle/seed),開啟時導到的網址前綴
         // (JS 在使用者勾選當下才補上新產生的 seed,每次打開都重新洗一次牌)。
         val baseExtraQuery = buildExtraQuery(folder, flat)
         val shuffleOffHref = "/watch?v=$index&sort=${sort.value}$baseExtraQuery"
-        val shuffleOnHrefPrefix = "/watch?v=$index&sort=${sort.value}$baseExtraQuery&shuffle=1&seed="
+        val shuffleOnHrefPrefix = "/watch?v=$index&sort=${sort.value}$baseExtraQuery&shuffle=1&first=$index&seed="
+
+        // 隨機播放中從側欄挑片:以挑的這部為新起點重排,剩下的全部都還輪得到(而不是沿用原本的順序,
+        // 挑到中間那部就會讓排在它前面、還沒播過的永遠輪不到)。
+        fun sidebarHref(i: Int): String =
+            "/watch?v=$i&sort=${sort.value}" + if (shuffle) buildExtraQuery(folder, flat, true, seed, i) else extraQuery
 
         val sidebar = if (order.size > 1) {
             """
             <aside class="sidebar">
               ${buildSortSelectHtml(sort.value, "/watch?v=$index&sort=", extraQuery)}
-              ${buildSidebarItems(manifest, order, index, sort, extraQuery)}
+              ${buildSidebarItems(manifest, order, index, ::sidebarHref)}
             </aside>
             """.trimIndent()
         } else {
@@ -560,7 +574,7 @@ object VideoHostPages {
 
     /** 右側影片清單:依目前選的排序方式列出全部影片(含目前播放中的那一部),每筆都附縮圖,
      * 目前播放中的那筆用樣式標示、不能再點。 */
-    private fun buildSidebarItems(manifest: List<HostManifestEntry>, order: List<Int>, currentIndex: Int, sort: VideoSort, extraQuery: String): String =
+    private fun buildSidebarItems(manifest: List<HostManifestEntry>, order: List<Int>, currentIndex: Int, hrefFor: (Int) -> String): String =
         order.joinToString("\n") { i ->
             val entry = manifest[i]
             val isCurrent = i == currentIndex
@@ -581,7 +595,7 @@ object VideoHostPages {
             if (isCurrent) {
                 """<div class="side-item current">$thumb$info</div>"""
             } else {
-                """<a class="side-item" href="/watch?v=$i&sort=${sort.value}$extraQuery">$thumb$info</a>"""
+                """<a class="side-item" href="${hrefFor(i)}">$thumb$info</a>"""
             }
         }
 

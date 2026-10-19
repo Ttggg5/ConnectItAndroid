@@ -251,7 +251,7 @@ fun TvVideoHostControlScreen(service: ConnectItService, onBack: () -> Unit) {
                     border = tvBrandCardBorder(),
                     scale = tvBrandCardScale(),
                     onClick = {
-                        service.remoteControlPlayVideo(entry.relativePath)
+                        service.remoteControlPickVideo(entry.relativePath)
                         snapshot = service.currentPlaybackSnapshot()
                     },
                     modifier = Modifier.fillMaxWidth(),

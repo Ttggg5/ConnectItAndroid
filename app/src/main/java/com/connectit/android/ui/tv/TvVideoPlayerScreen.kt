@@ -5,6 +5,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
@@ -13,6 +15,7 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -20,8 +23,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.FastForward
@@ -30,7 +39,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
-import androidx.compose.material.icons.filled.SettingsRemote
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Speed
@@ -56,6 +65,8 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
@@ -63,22 +74,28 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import androidx.tv.material3.Card
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Icon
 import androidx.tv.material3.IconButton
+import androidx.tv.material3.IconButtonDefaults
 import androidx.tv.material3.MaterialTheme
-import androidx.tv.material3.Surface
-import androidx.tv.material3.Text
 import androidx.tv.material3.OutlinedButton
+import androidx.tv.material3.Text
 import com.connectit.android.R
 import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.net.observeControlState
 import com.connectit.android.net.videoMediaUrl
+import com.connectit.android.net.videoThumbnailUrl
 import com.connectit.android.repo.PlaybackPreferences
 import com.connectit.android.repo.RecentlyWatchedStore
+import com.connectit.android.ui.components.NowPlayingBadge
+import com.connectit.android.ui.components.VideoThumbnail
+import com.connectit.android.ui.components.formatBytes
+import com.connectit.android.ui.screens.VideoSortOption
+import com.connectit.android.ui.screens.sortedByOption
 import com.connectit.android.ui.theme.BrandColors
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -86,13 +103,19 @@ import kotlinx.coroutines.launch
 
 private val SkipDurationMs = 10_000L
 private val SpeedOptions = listOf(0.5f, 1f, 1.25f, 1.5f, 2f)
+private const val VolumeStep = 0.1f
 
 /**
  * TV 版觀看畫面:沒有滑鼠 hover、沒有觸控,控制列改成任何遙控器按鍵都會喚出(對應手機版滑鼠移到
  * 影片上/點擊才顯示),喚出前 左/右鍵直接當作快轉/倒轉 10 秒、確認鍵當作播放/暫停——這是電視
  * 播放器常見的操作手感(YouTube/Netflix 的 TV app 都是這樣),不用先喚出控制列、把焦點移到按鈕上
- * 才能操作。進度條本身也是可 focus 的元件(見 TvSeekBar),focus 在上面時左右鍵直接跳轉進度,
- * 跟其他按鈕一樣走方向鍵在控制列內移動焦點。
+ * 才能操作。進度條、音量條本身也是可 focus 的元件(見 TvSeekBar/TvVolumeBar),focus 在上面時
+ * 左右鍵直接調整,跟其他按鈕一樣走方向鍵在控制列內移動焦點。
+ *
+ * 功能對齊手機版 VideoPlayerScreen:上一部/下一部、快轉倒轉、音量(分段調整 + 靜音)、播放速度、
+ * 自動播放下一部、隨機播放、可排序的播放清單(從右側滑出的面板)。
+ *
+ * 遠端控制模式下不顯示任何提示或控制列,畫面只有影片本身,播放完全跟隨主機。
  */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
@@ -113,17 +136,22 @@ fun TvVideoPlayerScreen(
     val prefs = remember { PlaybackPreferences(context.applicationContext) }
     val exoPlayer = remember { ExoPlayer.Builder(context).build() }
     val rootFocusRequester = remember { FocusRequester() }
+    val playPauseFocusRequester = remember { FocusRequester() }
 
     var currentIndex by remember { mutableStateOf(startIndex) }
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableStateOf(0L) }
     var durationMs by remember { mutableStateOf(0L) }
     var volume by remember { mutableStateOf(1f) }
+    var mutedVolume by remember { mutableStateOf<Float?>(null) }
     var speed by remember { mutableStateOf(1f) }
     var autoplayNext by remember { mutableStateOf(true) }
+    var shuffle by remember { mutableStateOf(false) }
+    var sortOption by remember { mutableStateOf(VideoSortOption.NAME_ASC) }
+    var playlistVisible by remember { mutableStateOf(false) }
 
-    // 遠端控制模式:主機正在控制播放時鎖住手動控制列,改成跟隨輪詢到的狀態播放——跟手機版
-    // VideoPlayerScreen 是同一套輪詢邏輯(見下方對 fetchControlState 的說明)。
+    // 遠端控制模式:主機正在控制播放時鎖住手動控制列,改成跟隨主機推送的狀態播放——跟手機版
+    // VideoPlayerScreen 是同一套邏輯(見下方對 observeControlState 的訂閱)。
     var remoteEnabled by remember { mutableStateOf(remoteControlHint) }
     var lastRemoteResyncAt by remember { mutableStateOf(0L) }
 
@@ -133,19 +161,42 @@ fun TvVideoPlayerScreen(
         controlsVisible = true
         controlsInteractionTick++
     }
-    LaunchedEffect(controlsInteractionTick, isPlaying) {
-        if (isPlaying) {
+    // 播放清單開著時不自動隱藏控制列,使用者可能還在慢慢挑片。
+    LaunchedEffect(controlsInteractionTick, isPlaying, playlistVisible) {
+        if (isPlaying && !playlistVisible) {
             delay(4_000)
             controlsVisible = false
         }
     }
-    LaunchedEffect(controlsVisible) {
-        if (!controlsVisible) rootFocusRequester.requestFocus()
+    // 控制列一出現就把焦點放到播放/暫停鍵上,方向鍵可以直接在按鈕間移動;隱藏時焦點交回根節點,
+    // 讓「未喚出控制列時左右鍵快轉倒轉」的處理接得到按鍵。
+    LaunchedEffect(controlsVisible, remoteEnabled, playlistVisible) {
+        if (controlsVisible && !remoteEnabled) {
+            delay(50)
+            if (!playlistVisible) runCatching { playPauseFocusRequester.requestFocus() }
+        } else {
+            runCatching { rootFocusRequester.requestFocus() }
+        }
     }
-    LaunchedEffect(Unit) { rootFocusRequester.requestFocus() }
+    LaunchedEffect(Unit) { runCatching { rootFocusRequester.requestFocus() } }
 
     fun videoKey(entry: VideoManifestEntry) = "${server.host}:${server.port}/${entry.relativePath}"
 
+    // 播放順序(存 entries 的索引)。隨機播放時一律以「指定的那部排第一,其餘打亂接在後面」重建——
+    // 不能把整份清單直接洗牌,否則正在看的這部會被洗到隨機位置:洗到最後就播完即停、「下一部」不能按,
+    // 「第 N 部」的顯示也會亂跳。
+    var playOrder by remember { mutableStateOf(entries.indices.toList()) }
+    fun buildPlayOrder(first: Int): List<Int> =
+        if (shuffle) listOf(first) + (entries.indices - first).shuffled() else entries.indices.toList()
+
+    /** 隨機播放中手動挑片:已經播過的保留在前面(「上一部」還回得去),挑的這部接在後面,
+     * 剩下還沒播的重新洗牌。依序播放時順序本來就固定,不用動。 */
+    fun reorderForManualPick(index: Int) {
+        if (!shuffle) return
+        val position = playOrder.indexOf(currentIndex)
+        val history = playOrder.take(position + 1) - index
+        playOrder = history + index + (entries.indices - history.toSet() - index).shuffled()
+    }
 
     fun playIndex(index: Int) {
         if (index !in entries.indices) return
@@ -168,6 +219,8 @@ fun TvVideoPlayerScreen(
         }
     }
 
+    fun previousIndex(): Int? = playOrder.getOrNull(playOrder.indexOf(currentIndex) - 1)
+    fun nextIndex(): Int? = playOrder.indexOf(currentIndex).takeIf { it >= 0 }?.let { playOrder.getOrNull(it + 1) }
 
     fun togglePlayPause() {
         if (exoPlayer.playbackState == Player.STATE_ENDED) {
@@ -185,10 +238,32 @@ fun TvVideoPlayerScreen(
         exoPlayer.seekTo((exoPlayer.currentPosition + deltaMs).coerceIn(0L, max))
     }
 
+    fun setVolumeAndPersist(value: Float) {
+        // 四捨五入到 0.1 的倍數,避免浮點累加後出現 0.70000005 這種值、百分比顯示跳動。
+        volume = (Math.round(value.coerceIn(0f, 1f) * 10f) / 10f)
+        mutedVolume = null
+        exoPlayer.volume = volume
+        scope.launch { prefs.setVolume(volume) }
+    }
+
+    fun toggleMute() {
+        val savedVolume = mutedVolume
+        if (savedVolume != null) {
+            mutedVolume = null
+            volume = savedVolume
+        } else {
+            mutedVolume = volume.takeIf { it > 0f } ?: 1f
+            volume = 0f
+        }
+        exoPlayer.volume = volume
+    }
+
     LaunchedEffect(Unit) {
         volume = prefs.volume.first()
         speed = prefs.speed.first()
         autoplayNext = prefs.autoplayNext.first()
+        shuffle = prefs.shuffle.first()
+        playOrder = buildPlayOrder(startIndex)
         exoPlayer.volume = volume
         exoPlayer.setPlaybackSpeed(speed)
         playIndex(startIndex)
@@ -205,9 +280,10 @@ fun TvVideoPlayerScreen(
                     val finished = entries.getOrNull(currentIndex) ?: return
                     scope.launch { prefs.clearPosition(videoKey(finished)) }
                     recentlyWatched.remove(server.displayName, finished.relativePath)
-                    val nextIndex = currentIndex + 1
-                    // 遠端控制中由主機決定要不要/切到哪一部,觀看端不自己倒數跳下一部。
-                    if (autoplayNext && !remoteEnabled && nextIndex in entries.indices) scope.launch { playIndex(nextIndex) }
+                    val next = nextIndex()
+                    // 遠端控制中由主機決定要不要/切到哪一部,觀看端不自己跳下一部。
+                    if (autoplayNext && !remoteEnabled && next != null) scope.launch { playIndex(next) }
+                    else showControls()
                 }
             }
         }
@@ -242,6 +318,7 @@ fun TvVideoPlayerScreen(
         observeControlState(server.host, server.port).collect { state ->
             remoteEnabled = state.enabled
             if (!state.enabled) return@collect
+            playlistVisible = false
 
             val targetIndex = state.videoRelativePath
                 ?.let { path -> entries.indexOfFirst { it.relativePath == path } }
@@ -280,7 +357,15 @@ fun TvVideoPlayerScreen(
     fun navigateBack() {
         if (remoteEnabled) onExitRemoteControl() else onBack()
     }
-    BackHandler { navigateBack() }
+    // 返回鍵逐層退出:播放清單 → 控制列 → 離開畫面(跟 TV 播放器常見的行為一致)。
+    BackHandler {
+        when {
+            remoteEnabled -> navigateBack()
+            playlistVisible -> { playlistVisible = false; showControls() }
+            controlsVisible && isPlaying -> controlsVisible = false
+            else -> navigateBack()
+        }
+    }
 
     val currentEntry = entries.getOrNull(currentIndex)
 
@@ -296,10 +381,10 @@ fun TvVideoPlayerScreen(
                     Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause -> { showControls(); togglePlayPause(); true }
                     Key.MediaFastForward -> { showControls(); seekBy(SkipDurationMs); true }
                     Key.MediaRewind -> { showControls(); seekBy(-SkipDurationMs); true }
-                    Key.MediaNext -> { showControls(); playIndex(currentIndex + 1); true }
-                    Key.MediaPrevious -> { showControls(); playIndex(currentIndex - 1); true }
-                    else -> if (controlsVisible) {
-                        // 控制列已經顯示,交給正常的焦點系統在按鈕間移動——只在這裡重置自動隱藏的
+                    Key.MediaNext -> { showControls(); nextIndex()?.let(::playIndex); true }
+                    Key.MediaPrevious -> { showControls(); previousIndex()?.let(::playIndex); true }
+                    else -> if (controlsVisible || playlistVisible) {
+                        // 控制列/清單已經顯示,交給正常的焦點系統在按鈕間移動——只在這裡重置自動隱藏的
                         // 計時器,避免使用者還在操作控制列時它自己先淡出。
                         showControls()
                         false
@@ -308,6 +393,8 @@ fun TvVideoPlayerScreen(
                             Key.DirectionLeft -> { showControls(); seekBy(-SkipDurationMs); true }
                             Key.DirectionRight -> { showControls(); seekBy(SkipDurationMs); true }
                             Key.DirectionCenter, Key.Enter -> { showControls(); togglePlayPause(); true }
+                            // 返回鍵交給 BackHandler,不能在這裡吃掉。
+                            Key.Back, Key.Escape -> false
                             else -> { showControls(); true }
                         }
                     }
@@ -323,38 +410,34 @@ fun TvVideoPlayerScreen(
             },
         )
 
-
-        if (remoteEnabled) {
-            Surface(modifier = Modifier.align(Alignment.TopCenter).padding(24.dp)) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Icon(Icons.Filled.SettingsRemote, contentDescription = null)
-                    Text("遙控模式中,由主機控制播放")
-                }
-            }
-        } else {
+        if (!remoteEnabled) {
             AnimatedVisibility(
-                visible = controlsVisible,
+                visible = controlsVisible && !playlistVisible,
                 enter = fadeIn(),
                 exit = fadeOut(),
                 modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
             ) {
                 TvVideoControls(
                     title = currentEntry?.name ?: server.displayName,
+                    subtitle = buildString {
+                        append(server.displayName)
+                        if (entries.size > 1) append("・第 ${playOrder.indexOf(currentIndex) + 1} / ${entries.size} 部")
+                    },
                     isPlaying = isPlaying,
                     positionMs = positionMs,
                     durationMs = durationMs,
-                    hasPrevious = currentIndex > 0,
-                    hasNext = currentIndex < entries.lastIndex,
-                    onPrevious = { showControls(); playIndex(currentIndex - 1) },
-                    onNext = { showControls(); playIndex(currentIndex + 1) },
+                    playPauseFocusRequester = playPauseFocusRequester,
+                    hasPrevious = previousIndex() != null,
+                    hasNext = nextIndex() != null,
+                    onPrevious = { showControls(); previousIndex()?.let(::playIndex) },
+                    onNext = { showControls(); nextIndex()?.let(::playIndex) },
                     onRewind = { showControls(); seekBy(-SkipDurationMs) },
                     onForward = { showControls(); seekBy(SkipDurationMs) },
                     onSeek = { deltaMs -> showControls(); seekBy(deltaMs) },
                     onPlayPause = { showControls(); togglePlayPause() },
+                    volume = volume,
+                    onVolumeStep = { delta -> showControls(); setVolumeAndPersist(volume + delta) },
+                    onToggleMute = { showControls(); toggleMute() },
                     speed = speed,
                     onCycleSpeed = {
                         showControls()
@@ -369,12 +452,39 @@ fun TvVideoPlayerScreen(
                         autoplayNext = !autoplayNext
                         scope.launch { prefs.setAutoplayNext(autoplayNext) }
                     },
-                    muted = volume <= 0f,
-                    onToggleMute = {
+                    shuffle = shuffle,
+                    onToggleShuffle = {
                         showControls()
-                        volume = if (volume > 0f) 0f else 1f
-                        exoPlayer.volume = volume
-                        scope.launch { prefs.setVolume(volume) }
+                        shuffle = !shuffle
+                        playOrder = buildPlayOrder(currentIndex)
+                        scope.launch { prefs.setShuffle(shuffle) }
+                    },
+                    showPlaylistButton = entries.size > 1,
+                    onOpenPlaylist = { showControls(); playlistVisible = true },
+                )
+            }
+
+            AnimatedVisibility(
+                visible = playlistVisible,
+                enter = slideInHorizontally { it } + fadeIn(),
+                exit = slideOutHorizontally { it } + fadeOut(),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+            ) {
+                TvPlaylistPanel(
+                    entries = entries,
+                    currentIndex = currentIndex,
+                    server = server,
+                    sortOption = sortOption,
+                    onCycleSort = {
+                        sortOption = VideoSortOption.entries[(sortOption.ordinal + 1) % VideoSortOption.entries.size]
+                    },
+                    onSelect = { index ->
+                        playlistVisible = false
+                        if (index != currentIndex) {
+                            reorderForManualPick(index)
+                            playIndex(index)
+                        }
+                        showControls()
                     },
                 )
             }
@@ -386,9 +496,11 @@ fun TvVideoPlayerScreen(
 @Composable
 private fun TvVideoControls(
     title: String,
+    subtitle: String,
     isPlaying: Boolean,
     positionMs: Long,
     durationMs: Long,
+    playPauseFocusRequester: FocusRequester,
     hasPrevious: Boolean,
     hasNext: Boolean,
     onPrevious: () -> Unit,
@@ -397,12 +509,17 @@ private fun TvVideoControls(
     onForward: () -> Unit,
     onSeek: (Long) -> Unit,
     onPlayPause: () -> Unit,
+    volume: Float,
+    onVolumeStep: (Float) -> Unit,
+    onToggleMute: () -> Unit,
     speed: Float,
     onCycleSpeed: () -> Unit,
     autoplayNext: Boolean,
     onToggleAutoplay: () -> Unit,
-    muted: Boolean,
-    onToggleMute: () -> Unit,
+    shuffle: Boolean,
+    onToggleShuffle: () -> Unit,
+    showPlaylistButton: Boolean,
+    onOpenPlaylist: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -410,7 +527,13 @@ private fun TvVideoControls(
             .background(Brush.verticalGradient(0f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.9f)))
             .padding(horizontal = 32.dp, vertical = 20.dp),
     ) {
-        Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+        Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            subtitle,
+            style = MaterialTheme.typography.bodySmall,
+            color = Color.White.copy(alpha = 0.7f),
+            maxLines = 1,
+        )
 
         TvSeekBar(
             positionMs = positionMs,
@@ -434,7 +557,7 @@ private fun TvVideoControls(
             IconButton(onClick = onRewind) {
                 Icon(Icons.Filled.FastRewind, contentDescription = "倒退 10 秒")
             }
-            IconButton(onClick = onPlayPause) {
+            IconButton(onClick = onPlayPause, modifier = Modifier.focusRequester(playPauseFocusRequester)) {
                 Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = "播放/暫停")
             }
             IconButton(onClick = onForward) {
@@ -448,21 +571,62 @@ private fun TvVideoControls(
 
             IconButton(onClick = onToggleMute) {
                 Icon(
-                    if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                    if (volume <= 0f) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                     contentDescription = "靜音",
                 )
             }
-            IconButton(onClick = onToggleAutoplay) {
-                Icon(
-                    if (autoplayNext) Icons.Filled.Repeat else Icons.Filled.RepeatOne,
-                    contentDescription = if (autoplayNext) "自動播放下一部:開" else "自動播放下一部:關",
-                )
-            }
+            TvVolumeBar(volume = volume, onStep = onVolumeStep, modifier = Modifier.width(120.dp))
+            Text(
+                "${Math.round(volume * 100)}%",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.width(44.dp),
+            )
+            ToggleIconButton(
+                active = autoplayNext,
+                onClick = onToggleAutoplay,
+                icon = if (autoplayNext) Icons.Filled.Repeat else Icons.Filled.RepeatOne,
+                contentDescription = if (autoplayNext) "自動播放下一部:開" else "自動播放下一部:關",
+            )
+            ToggleIconButton(
+                active = shuffle,
+                onClick = onToggleShuffle,
+                icon = Icons.Filled.Shuffle,
+                contentDescription = if (shuffle) "隨機播放:開" else "隨機播放:關",
+            )
             OutlinedButton(onClick = onCycleSpeed) {
                 Icon(Icons.Filled.Speed, contentDescription = null)
                 Text(" ${formatSpeedLabel(speed)}")
             }
+            if (showPlaylistButton) {
+                IconButton(onClick = onOpenPlaylist) {
+                    Icon(Icons.AutoMirrored.Filled.PlaylistPlay, contentDescription = "播放清單")
+                }
+            }
         }
+    }
+}
+
+/** 開/關狀態的圖示按鈕:開啟時套品牌色底,關閉時是一般的半透明按鈕,10 呎外也看得出狀態。 */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun ToggleIconButton(
+    active: Boolean,
+    onClick: () -> Unit,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+) {
+    IconButton(
+        onClick = onClick,
+        colors = if (active) {
+            IconButtonDefaults.colors(
+                containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+                contentColor = Color.White,
+            )
+        } else {
+            IconButtonDefaults.colors(contentColor = Color.White.copy(alpha = 0.6f))
+        },
+    ) {
+        Icon(icon, contentDescription = contentDescription)
     }
 }
 
@@ -478,9 +642,68 @@ private fun TvSeekBar(
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    TvFocusableBar(
+        fraction = tvFractionOf(positionMs, durationMs),
+        onLeft = { onSeek(-SkipDurationMs) },
+        onRight = { onSeek(SkipDurationMs) },
+        modifier = modifier,
+    )
+}
+
+/**
+ * 音量條:左右兩側都有按鈕,如果 focus 到就直接用左右鍵調音量,焦點會被困在這裡。所以平常左右鍵
+ * 只負責移動焦點,按確認鍵才進入「調整模式」(條變粗、顯示提示),這時左右鍵以 10% 為單位調整;
+ * 再按一次確認鍵、返回鍵或焦點離開就結束調整。
+ */
+@Composable
+private fun TvVolumeBar(volume: Float, onStep: (Float) -> Unit, modifier: Modifier = Modifier) {
+    var adjusting by remember { mutableStateOf(false) }
+    Column(modifier) {
+        TvFocusableBar(
+            fraction = volume.coerceIn(0f, 1f),
+            onLeft = { onStep(-VolumeStep) },
+            onRight = { onStep(VolumeStep) },
+            arrowsEnabled = adjusting,
+            highlighted = adjusting,
+            onFocusChanged = { focused -> if (!focused) adjusting = false },
+            onExtraKey = { key ->
+                when (key) {
+                    Key.DirectionCenter, Key.Enter -> { adjusting = !adjusting; true }
+                    Key.Back, Key.Escape -> if (adjusting) { adjusting = false; true } else false
+                    else -> false
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text(
+            if (adjusting) "← → 調整・確認結束" else "按確認調整",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White.copy(alpha = 0.6f),
+            maxLines = 1,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+    }
+}
+
+/**
+ * [arrowsEnabled] 為 false 時不處理左右鍵,交給焦點系統移到相鄰元件;[onExtraKey] 處理左右鍵以外的
+ * 按鍵,回傳 true 代表吃掉。
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun TvFocusableBar(
+    fraction: Float,
+    onLeft: () -> Unit,
+    onRight: () -> Unit,
+    modifier: Modifier = Modifier,
+    arrowsEnabled: Boolean = true,
+    highlighted: Boolean = false,
+    onFocusChanged: (Boolean) -> Unit = {},
+    onExtraKey: (Key) -> Boolean = { false },
+) {
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
-    val fraction = tvFractionOf(positionMs, durationMs)
+    LaunchedEffect(focused) { onFocusChanged(focused) }
 
     Box(
         modifier = modifier
@@ -488,17 +711,17 @@ private fun TvSeekBar(
             .onKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                 when (event.key) {
-                    Key.DirectionLeft -> { onSeek(-SkipDurationMs); true }
-                    Key.DirectionRight -> { onSeek(SkipDurationMs); true }
-                    else -> false
+                    Key.DirectionLeft -> if (arrowsEnabled) { onLeft(); true } else false
+                    Key.DirectionRight -> if (arrowsEnabled) { onRight(); true } else false
+                    else -> onExtraKey(event.key)
                 }
             }
-            .height(if (focused) 10.dp else 6.dp)
+            .height(if (highlighted) 14.dp else if (focused) 10.dp else 6.dp)
             .clip(RoundedCornerShape(50))
             .background(Color.White.copy(alpha = 0.25f))
             .border(
                 width = if (focused) 2.dp else 0.dp,
-                color = MaterialTheme.colorScheme.primary,
+                color = if (highlighted) Color.White else MaterialTheme.colorScheme.primary,
                 shape = RoundedCornerShape(50),
             ),
     ) {
@@ -509,6 +732,100 @@ private fun TvSeekBar(
                 .clip(RoundedCornerShape(50))
                 .background(BrandColors.GradientHorizontal),
         )
+    }
+}
+
+/**
+ * 從右側滑出的播放清單,對應手機版的側邊/堆疊清單:可切換排序(只影響清單顯示順序,上一部/
+ * 下一部仍照原本順序或隨機順序走),打開時焦點直接落在目前播放的那一部上。
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun TvPlaylistPanel(
+    entries: List<VideoManifestEntry>,
+    currentIndex: Int,
+    server: DiscoveredDevice,
+    sortOption: VideoSortOption,
+    onCycleSort: () -> Unit,
+    onSelect: (Int) -> Unit,
+) {
+    val indexByPath = remember(entries) { entries.withIndex().associate { (index, entry) -> entry.relativePath to index } }
+    val sortedEntries = remember(entries, sortOption) { entries.sortedByOption(sortOption) }
+    val currentPosition = sortedEntries.indexOfFirst { indexByPath[it.relativePath] == currentIndex }.coerceAtLeast(0)
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = currentPosition)
+    val currentFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) {
+        delay(50)
+        runCatching { currentFocusRequester.requestFocus() }
+    }
+
+    Column(
+        modifier = Modifier
+            .width(420.dp)
+            .fillMaxHeight()
+            .background(Color.Black.copy(alpha = 0.88f))
+            .padding(vertical = 20.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("播放清單", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+            OutlinedButton(onClick = onCycleSort) {
+                Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = null)
+                Text(" ${sortOption.label}", style = MaterialTheme.typography.labelMedium)
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        LazyColumn(
+            state = listState,
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(sortedEntries, key = { it.relativePath }) { entry ->
+                val index = indexByPath.getValue(entry.relativePath)
+                val isCurrent = index == currentIndex
+                Card(
+                    onClick = { onSelect(index) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(if (isCurrent) Modifier.focusRequester(currentFocusRequester) else Modifier),
+                    border = tvBrandCardBorder(),
+                    scale = tvBrandCardScale(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(modifier = Modifier.width(140.dp)) {
+                            VideoThumbnail(
+                                url = videoThumbnailUrl(server.host, server.port, entry.relativePath),
+                                modifier = Modifier.fillMaxWidth(),
+                                cornerRadius = 10.dp,
+                            )
+                            if (isCurrent) NowPlayingBadge(Modifier.align(Alignment.TopStart).padding(4.dp))
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                entry.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (isCurrent) FontWeight.SemiBold else null,
+                                color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                formatBytes(entry.size),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

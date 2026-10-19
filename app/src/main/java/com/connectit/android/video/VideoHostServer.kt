@@ -233,6 +233,7 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
             val watchFolder = if (watchFlat) "" else VideoHostPages.normalizeFolder(getQueryParam(request.path, "folder"))
             val watchShuffle = parseShuffle(request.path)
             val watchSeed = getQueryParam(request.path, "seed")?.toIntOrNull() ?: 0
+            val watchFirst = getQueryParam(request.path, "first")?.toIntOrNull()
 
             if (controlSnapshot.enabled) {
                 val activeRelativePath = controlSnapshot.videoRelativePath
@@ -250,7 +251,7 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
                 }
 
                 val sort = parseSortOption(request.path)
-                writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, activeIndex, sort, controlSnapshot, options, watchFolder, watchFlat, watchShuffle, watchSeed))
+                writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, activeIndex, sort, controlSnapshot, options, watchFolder, watchFlat, watchShuffle, watchSeed, watchFirst))
                 return
             }
 
@@ -261,7 +262,7 @@ class VideoHostServer(private val context: Context, private val controlState: Pl
             }
 
             val sort = parseSortOption(request.path)
-            writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, index, sort, controlSnapshot, options, watchFolder, watchFlat, watchShuffle, watchSeed))
+            writeHtml(output, VideoHostPages.buildWatchPageHtml(manifest, serverName, index, sort, controlSnapshot, options, watchFolder, watchFlat, watchShuffle, watchSeed, watchFirst))
             return
         }
 

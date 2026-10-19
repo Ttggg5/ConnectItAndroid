@@ -85,12 +85,14 @@ data class ConnectFailure(val deviceName: String, val outcome: ConnectionRequest
 /**
  * 主機端遙控面板的播放清單設定:決定影片庫的顯示順序與上一部/下一部/自動播放下一部要切到哪一部。
  * 對應 Windows 端遙控面板的排序下拉選單/隨機播放/自動播放下一部。[shuffleSeed] 讓同一輪隨機播放
- * 期間順序固定(每次重算結果都一樣),只有重新開啟隨機播放才換一組。
+ * 期間順序固定(每次重算結果都一樣),只有重新開啟隨機播放才換一組;[shuffleFirst](相對路徑)是這一輪
+ * 隨機播放的起點,固定排第一、只洗其餘的(見 [VideoHostPages.displayOrder] 的 first 參數)。
  */
 data class RemotePlaylistSettings(
     val sort: VideoSort = VideoSort.NAME_ASC,
     val shuffle: Boolean = VideoServerPlaybackOptions.DEFAULT_SHUFFLE,
     val shuffleSeed: Int = 0,
+    val shuffleFirst: String? = null,
     val autoplayNext: Boolean = VideoServerPlaybackOptions.DEFAULT_AUTOPLAY_NEXT,
 )
 
@@ -498,16 +500,29 @@ class ConnectItService : LifecycleService() {
     fun remotePlaylistEntries(): List<HostManifestEntry> {
         val manifest = hostManifestEntries()
         val settings = _remotePlaylist.value
-        return VideoHostPages.displayOrder(manifest, settings.sort, settings.shuffle, settings.shuffleSeed).map { manifest[it] }
+        val first = settings.shuffleFirst?.let { path -> manifest.indexOfFirst { it.relativePath == path } }?.takeIf { it >= 0 }
+        return VideoHostPages.displayOrder(manifest, settings.sort, settings.shuffle, settings.shuffleSeed, first).map { manifest[it] }
+    }
+
+    /** 遙控面板清單上手動點選影片:隨機播放中以點的這部為新起點重排,剩下的全部都還輪得到
+     * (上一部/下一部、自動播放下一部則照現有順序走,走 [remoteControlPlayVideo])。 */
+    fun remoteControlPickVideo(relativePath: String) {
+        if (_remotePlaylist.value.shuffle) _remotePlaylist.update { it.copy(shuffleFirst = relativePath) }
+        remoteControlPlayVideo(relativePath)
     }
 
     fun remoteControlSetSort(sort: VideoSort) {
         _remotePlaylist.update { it.copy(sort = sort) }
     }
 
-    /** 每次重新開啟都換一組 seed,不然關掉再打開會得到跟上次一模一樣的「隨機」順序。 */
+    /** 每次重新開啟都換一組 seed,不然關掉再打開會得到跟上次一模一樣的「隨機」順序;起點設成目前正在
+     * 播的那部,讓它排第一、其餘接在後面,不會被洗到清單中間或最後。 */
     fun remoteControlSetShuffle(enabled: Boolean) {
-        _remotePlaylist.update { it.copy(shuffle = enabled, shuffleSeed = if (enabled) Random.nextInt() else it.shuffleSeed) }
+        val current = playbackControlState.snapshot().videoRelativePath
+        _remotePlaylist.update {
+            if (enabled) it.copy(shuffle = true, shuffleSeed = Random.nextInt(), shuffleFirst = current)
+            else it.copy(shuffle = false)
+        }
     }
 
     fun remoteControlSetAutoplayNext(enabled: Boolean) {

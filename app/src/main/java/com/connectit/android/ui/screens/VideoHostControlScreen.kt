@@ -205,7 +205,7 @@ fun VideoHostControlScreen(service: ConnectItService, onBack: () -> Unit) {
                         PlaylistOptions(service, playlistSettings)
                     }
                     val onSelect = { entry: HostManifestEntry ->
-                        service.remoteControlPlayVideo(entry.relativePath)
+                        service.remoteControlPickVideo(entry.relativePath)
                         refresh()
                     }
 
