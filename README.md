@@ -39,6 +39,18 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
   觀看端透過 `/control/events` 同步。遙控畫面有自己的排序/隨機播放/自動播放下一部設定,
   自動播放下一部由 `ConnectItService` 負責,離開遙控畫面也照樣會接下一部。
 
+- **螢幕鏡像**:跟檔案傳輸共用同一條配對連線,多兩種訊框型別(2 = 控制訊息 JSON、3 = `[序號][JPEG]`
+  畫面),協定說明在 `net/ScreenMessages.kt` 開頭,跟 Windows 端 `ScreenMessage.cs` 逐欄位對應。
+  分享端用 MediaProjection → VirtualDisplay → ImageReader 擷取(長邊縮到 1280),要送下一張時才取
+  「最新」一張壓縮,觀看端每解完一張回 ack、最多 4 張未確認,延遲不會越積越多。
+  **遠端操控**靠無障礙服務(`screen/ScreenControlAccessibilityService.kt`):Android 沒有給一般 App 注入
+  觸控的 API,只能用 `dispatchGesture` 重播手勢、`performGlobalAction` 返回/主畫面、對輸入框
+  `ACTION_SET_TEXT` 打字。滑動/拖曳是即時的:用 `StrokeDescription.continueStroke` 一段一段接續送出,
+  每段完成就把期間累積的移動接成下一段;很快放開的點擊則整筆一次送出(最可靠)。
+  使用者必須在分享時勾選「允許對方操控」**而且**到系統無障礙設定開啟這個服務,兩者缺一就只能觀看;
+  缺服務時 App 會主動跳出說明並直接帶到這個服務的設定頁。Android 13 起側載安裝(非商店)的 App
+  開關會是灰的「受限制的設定」,說明裡也有「應用程式資訊 → ⋮ → 允許受限制的設定」的捷徑。
+
 ## 專案結構
 
 | 位置 | 說明 |
@@ -57,6 +69,8 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
 | `video/VideoHostServer.kt`、`video/VideoHostPages.kt` | 影片伺服器主機端:HTTP 端點與網頁(對應 `VideoStreamingService.cs`) |
 | `video/PlaybackControlState.kt` | 遙控模式的播放狀態(對應 Windows 端同名類別) |
 | `ui/screens/VideoHostControlScreen.kt` | 主機端遙控畫面(選片、播放控制、排序/隨機播放/自動播放下一部) |
+| `screen/` | 螢幕鏡像:狀態機(`ScreenMirrorController`)、MediaProjection 擷取、畫面解碼、無障礙服務與輸入轉換 |
+| `ui/screens/ScreenViewerScreen.kt` | 觀看對方螢幕(全螢幕)。對方是電腦時預設「觸控板模式」:單指移動游標、點=左鍵、兩指點=右鍵、兩指滑=捲動、長按後拖曳;可切成「直接點按模式」 |
 | `ui/` | Jetpack Compose 畫面(裝置、已連線、影片、設定) |
 
 ## 介面與操作流程
@@ -69,6 +83,9 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
   (平板/折疊機攤開時在右側),包含傳送檔案/資料夾、傳輸進度、接收完成後「開啟檔案」、這次連線的傳輸紀錄。
 - **連線流程**:按下連線後顯示可取消的「等待對方接受」對話框;被拒絕、沒回應、連不到時分別說明原因。
 - **傳輸進度與通知**:傳輸卡片顯示百分比、傳輸速度與預計剩餘時間;通知列有即時進度條,完成或失敗時跳出通知。
+- **螢幕鏡像**:「目前連線」卡片可以「觀看對方螢幕」或「分享我的螢幕」,對方同意後開始;分享時系統會
+  再詢問一次是否允許擷取螢幕。觀看時可以隱藏工具列、叫出鍵盤打字(支援注音等輸入法)。TV 版可以分享與觀看,
+  但觀看時只能看不能操控(沒有觸控)。
 - **異常斷線偵測**:連線期間雙方每 4 秒互送心跳(跟 Windows 端同一套),對方沒有正常關閉連線就消失時,約 15 秒內就會判定斷線並通知。
 - **從其他 App 分享**:在相簿或檔案管理員按「分享」→ ConnectIt,選一台裝置就會傳送(還沒連線的話會先送出連線請求,對方接受後自動開始傳送)。
 - **影片頁**:分成「觀看」(含「繼續觀看」,記住最近看到一半的影片,伺服器重新上線時直接從上次的位置繼續)

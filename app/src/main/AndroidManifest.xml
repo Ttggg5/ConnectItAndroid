@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 螢幕鏡像:分享螢幕期間前景服務要多宣告 mediaProjection 類型(Android 14 起需要這個權限)。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 只有 API 28(Android 9)以下的裝置需要:寫入公用 Download 資料夾。API 29 起改用
          MediaStore.Downloads,不需要這個權限。 -->
@@ -62,7 +64,23 @@
         <service
             android:name=".service.ConnectItService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|mediaProjection" />
+
+        <!-- 螢幕鏡像的遠端操控:只有分享螢幕、而且使用者勾選「允許對方操控」時才會用到,
+             使用者必須自己到系統的無障礙設定開啟(見 screen/ScreenControlAccessibilityService.kt)。
+             只有系統持有 BIND_ACCESSIBILITY_SERVICE 權限,其他 App 綁不到它。 -->
+        <service
+            android:name=".screen.ScreenControlAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
 
     </application>
 

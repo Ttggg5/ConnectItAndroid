@@ -69,6 +69,7 @@ import com.connectit.android.model.DiscoveredDevice
 import com.connectit.android.model.VideoManifestEntry
 import com.connectit.android.repo.AppSettings
 import com.connectit.android.repo.RecentlyWatched
+import com.connectit.android.screen.ScreenMirrorState
 import com.connectit.android.service.ConnectItService
 import com.connectit.android.service.ConnectionUiState
 import com.connectit.android.ui.components.AdaptiveNavigationBreakpoint
@@ -77,9 +78,11 @@ import com.connectit.android.ui.components.ConnectionRequestDialog
 import com.connectit.android.ui.components.GradientAvatar
 import com.connectit.android.ui.components.GradientButton
 import com.connectit.android.ui.components.RadarPulse
+import com.connectit.android.ui.components.ScreenMirrorHost
 import com.connectit.android.ui.components.WaitingForAcceptDialog
 import com.connectit.android.ui.screens.DevicesScreen
 import com.connectit.android.ui.screens.OnboardingScreen
+import com.connectit.android.ui.screens.ScreenViewerScreen
 import com.connectit.android.ui.screens.SettingsScreen
 import com.connectit.android.ui.screens.VideoHostControlScreen
 import com.connectit.android.ui.screens.VideoPlayerScreen
@@ -122,6 +125,7 @@ fun ConnectItApp(service: ConnectItService, viewModel: MainViewModel) {
     val pendingConnectionRequest by service.pendingConnectionRequest.collectAsState()
     val connectingTo by service.connectingTo.collectAsState()
     val connectFailure by service.connectFailure.collectAsState()
+    val screenMirrorState by service.screenMirror.state.collectAsState()
     val pendingShare by viewModel.pendingShare.collectAsState()
     // 初始值 null 代表 DataStore 還沒讀出來:這段期間不要決定要不要顯示引導,避免閃一下。
     val settings by service.settingsRepository.settings.collectAsState(initial = null)
@@ -161,6 +165,20 @@ fun ConnectItApp(service: ConnectItService, viewModel: MainViewModel) {
             viewModel.notificationPermissionRequested = true
             tab = AppTab.DEVICES
         }
+        return
+    }
+
+    // 放在下面各種「整頁子畫面」的提早 return 之前:不論使用者在哪一頁(例如正在看影片),
+    // 對方送來的螢幕鏡像請求都要跳出來。
+    ScreenMirrorHost(service = service)
+
+    // 觀看對方螢幕時整個畫面都讓給它(全螢幕),結束後自動回到原本的頁面。
+    (screenMirrorState as? ScreenMirrorState.Viewing)?.let { viewing ->
+        ScreenViewerScreen(
+            service = service,
+            state = viewing,
+            peerName = (connectionState as? ConnectionUiState.Connected)?.peer?.name ?: "對方",
+        )
         return
     }
 

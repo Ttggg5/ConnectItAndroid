@@ -9,6 +9,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.net.nsd.NsdManager
 import android.os.Binder
@@ -38,6 +40,8 @@ import com.connectit.android.model.TransferRecord
 import com.connectit.android.repo.AppSettings
 import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.repo.SettingsRepository
+import com.connectit.android.screen.ScreenMirrorController
+import com.connectit.android.screen.ScreenMirrorState
 import com.connectit.android.util.DownloadStorage
 import com.connectit.android.util.NetworkUtils
 import com.connectit.android.util.TransferRateTracker
@@ -131,6 +135,13 @@ class ConnectItService : LifecycleService() {
     private lateinit var videoHostServer: VideoHostServer
     private lateinit var playbackControlState: PlaybackControlState
 
+    /** 螢幕鏡像(分享/觀看/遠端操控),跑在配對連線上,見 [ScreenMirrorController]。 */
+    lateinit var screenMirror: ScreenMirrorController
+        private set
+
+    /** 目前前景服務宣告的類型:分享螢幕期間要多帶 mediaProjection,onStartCommand 重貼通知時也要沿用。 */
+    @Volatile private var foregroundServiceTypes = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+
     /** 目前生效的設定快照,由 [onCreate] 裡的收集器持續更新,供不是 Compose 環境的內部邏輯
      * (通知開關、信任裝置比對、下載資料夾)同步讀取,不用每次都掛一個新的 Flow 收集器。 */
     @Volatile private var cachedSettings: AppSettings = AppSettings(deviceName = "", themeMode = AppThemeMode.AUTO)
@@ -219,9 +230,7 @@ class ConnectItService : LifecycleService() {
             // 讓這裡重新收到一次 onStartCommand——不管 Service 本來是不是已經在跑。藉這個時機重貼一次
             // 常駐通知:如果使用者之前手動把通知清掉(部分廠牌系統允許清除 ongoing 通知),重新開啟 App
             // 時就能讓通知補回來,而不是要等 Service 被整個重建(onCreate 只會在真正重建時執行一次)。
-            ServiceCompat.startForeground(
-                this, NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-            )
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), foregroundServiceTypes)
         }
         return START_NOT_STICKY
     }
@@ -241,8 +250,16 @@ class ConnectItService : LifecycleService() {
         videoHostServer = VideoHostServer(applicationContext, playbackControlState)
         connectionEngine = ConnectionEngine(applicationContext, lifecycleScope)
         connectionEngine.customDownloadFolderProvider = { cachedSettings.customDownloadFolderUri?.let(Uri::parse) }
+        screenMirror = ScreenMirrorController(
+            context = applicationContext,
+            scope = lifecycleScope,
+            engine = connectionEngine,
+            onNotice = { pushEvent(it) },
+            onProjectionReleased = { setForegroundTypes(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) },
+        )
 
         wireCallbacks()
+        observeScreenMirror()
 
         deviceDiscovery.startDiscovery()
         videoDiscovery.startDiscovery()
@@ -271,6 +288,7 @@ class ConnectItService : LifecycleService() {
     }
 
     override fun onDestroy() {
+        screenMirror.onConnectionClosed()
         deviceDiscovery.teardown()
         videoDiscovery.teardown()
         videoHostServer.stop()
@@ -341,6 +359,7 @@ class ConnectItService : LifecycleService() {
     }
 
     fun disconnectFromPeer() {
+        screenMirror.onConnectionClosed()
         connectionEngine.disconnect()
         _connectionState.value = ConnectionUiState.Idle
         _transferState.value = null
@@ -562,6 +581,67 @@ class ConnectItService : LifecycleService() {
         remoteControlPlayVideo(next.relativePath)
     }
 
+    // ===================== 螢幕鏡像 =====================
+
+    /**
+     * 系統「開始錄製或投放」確認畫面的結果(由畫面端的 ActivityResult 轉交過來)。Android 14 起規定:
+     * 必須在使用者同意之後、取得 MediaProjection 之前,把前景服務升級成 mediaProjection 類型;
+     * Android 10~13 則要求取得 MediaProjection 時已經是這個類型的前景服務。
+     */
+    fun onScreenCapturePermissionResult(resultCode: Int, data: Intent?) {
+        if (resultCode != android.app.Activity.RESULT_OK || data == null) {
+            screenMirror.onProjectionResult(null)
+            return
+        }
+        val projection: MediaProjection? = try {
+            setForegroundTypes(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            manager.getMediaProjection(resultCode, data)
+        } catch (e: Exception) {
+            pushLog("無法取得螢幕擷取權限:${e.message}")
+            null
+        }
+        if (projection == null) {
+            setForegroundTypes(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        }
+        screenMirror.onProjectionResult(projection, unsupported = false)
+    }
+
+    private fun setForegroundTypes(types: Int) {
+        if (foregroundServiceTypes == types) return
+        foregroundServiceTypes = types
+        runCatching { ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), types) }
+            .onFailure { pushLog("無法更新前景服務類型:${it.message}") }
+    }
+
+    /** 對方想看我的螢幕/想分享螢幕給我時,App 在背景的話跳通知提醒使用者回來處理。 */
+    private fun observeScreenMirror() {
+        lifecycleScope.launch {
+            screenMirror.state.collect { state ->
+                val peerName = (_connectionState.value as? ConnectionUiState.Connected)?.peer?.name
+                    ?: getString(R.string.notification_incoming_transfer_unknown_peer)
+                when (state) {
+                    is ScreenMirrorState.IncomingRequest -> notifyScreenMirrorRequest("$peerName 想要觀看你的螢幕")
+                    is ScreenMirrorState.IncomingOffer -> notifyScreenMirrorRequest("$peerName 想要分享螢幕給你")
+                    else -> NotificationManagerCompat.from(this@ConnectItService).cancel(SCREEN_MIRROR_NOTIFICATION_ID)
+                }
+            }
+        }
+    }
+
+    private fun notifyScreenMirrorRequest(title: String) {
+        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(getString(R.string.notification_connection_request_text))
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(mainActivityIntent())
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        postAlertNotification(SCREEN_MIRROR_NOTIFICATION_ID, notification)
+    }
+
     // ===================== 內部事件轉接 =====================
 
     private fun wireCallbacks() {
@@ -586,6 +666,8 @@ class ConnectItService : LifecycleService() {
         videoHostServer.onStatusChanged = { pushLog(it) }
 
         connectionEngine.onStatusChanged = { pushLog(it) }
+        connectionEngine.onScreenMessage = { screenMirror.handleMessage(it) }
+        connectionEngine.onScreenFrame = { screenMirror.handleFrame(it) }
 
         connectionEngine.onConnectionRequested = { request ->
             val isTrusted = cachedSettings.trustedDeviceNames.any { it.equals(request.requesterName, ignoreCase = true) }
@@ -611,6 +693,7 @@ class ConnectItService : LifecycleService() {
         }
 
         connectionEngine.onRemoteDisconnected = {
+            screenMirror.onConnectionClosed()
             val peerName = (_connectionState.value as? ConnectionUiState.Connected)?.peer?.name
             _connectionState.value = ConnectionUiState.Idle
             _transferState.value = null
@@ -945,5 +1028,6 @@ class ConnectItService : LifecycleService() {
         private const val MAX_TRANSFER_HISTORY = 50
         private const val TRANSFER_PROGRESS_NOTIFICATION_ID = 6
         private const val PROGRESS_NOTIFICATION_INTERVAL_MS = 500L
+        private const val SCREEN_MIRROR_NOTIFICATION_ID = 7
     }
 }

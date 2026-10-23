@@ -19,6 +19,7 @@ import com.connectit.android.net.ConnectMessage
 import com.connectit.android.net.FILE_CHUNK_SIZE
 import com.connectit.android.net.FileControlMessage
 import com.connectit.android.net.FrameType
+import com.connectit.android.net.ScreenMessage
 import com.connectit.android.net.readFrame
 import com.connectit.android.net.readLine
 import com.connectit.android.net.writeFrame
@@ -87,6 +88,12 @@ class ConnectionEngine(
     var onFileTransferProgress: ((TransferProgress) -> Unit)? = null
     var onFileTransferEnded: ((FileTransferEnded) -> Unit)? = null
     var onFolderTransferEnded: ((FolderTransferEnded) -> Unit)? = null
+
+    /** 收到螢幕鏡像控制訊息(見 [ScreenMessage]),在讀取迴圈上呼叫,處理時不能阻塞太久。 */
+    var onScreenMessage: ((ScreenMessage) -> Unit)? = null
+
+    /** 收到一張螢幕畫面:payload 是 [序號 4 bytes][JPEG],在讀取迴圈上呼叫,解碼請另外開工作。 */
+    var onScreenFrame: ((ByteArray) -> Unit)? = null
 
     @Volatile private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
@@ -307,6 +314,8 @@ class ConnectionEngine(
                     when (frame.type) {
                         FrameType.CONTROL -> handleControlFrame(frame.payload)
                         FrameType.CHUNK -> handleChunkFrame(frame.payload)
+                        FrameType.SCREEN_CONTROL -> ScreenMessage.parse(frame.payload)?.let { onScreenMessage?.invoke(it) }
+                        FrameType.SCREEN_FRAME -> onScreenFrame?.invoke(frame.payload)
                     }
                 }
             } catch (e: CancellationException) {
@@ -382,6 +391,16 @@ class ConnectionEngine(
                 // 寫入失敗通常代表連線已經斷了,交給監控迴圈去處理斷線通知即可。
             }
         }
+    }
+
+    suspend fun sendScreenMessage(message: ScreenMessage) {
+        val payload = message.toJson()
+        writeRaw(FrameType.SCREEN_CONTROL, payload, payload.size)
+    }
+
+    /** [payload] 前 4 bytes 必須已經填好 big-endian 的畫面序號,後面接 JPEG 內容,總長 [length]。 */
+    suspend fun sendScreenFrame(payload: ByteArray, length: Int) {
+        writeRaw(FrameType.SCREEN_FRAME, payload, length)
     }
 
     private fun launchWrite(message: FileControlMessage) {

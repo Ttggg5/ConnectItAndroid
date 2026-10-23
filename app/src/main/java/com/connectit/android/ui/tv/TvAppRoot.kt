@@ -35,6 +35,10 @@ import com.connectit.android.repo.RecentlyWatched
 import com.connectit.android.ui.components.ConnectFailureDialog
 import com.connectit.android.ui.components.ConnectionRequestDialog
 import com.connectit.android.ui.components.GradientAvatar
+import com.connectit.android.ui.components.ScreenMirrorHost
+import com.connectit.android.ui.screens.ScreenViewerScreen
+import com.connectit.android.screen.ScreenMirrorState
+import com.connectit.android.service.ConnectionUiState
 import com.connectit.android.ui.components.WaitingForAcceptDialog
 import com.connectit.android.ui.screens.OnboardingScreen
 import com.connectit.android.ui.theme.ConnectItTheme
@@ -73,6 +77,8 @@ fun TvAppRoot(service: ConnectItService) {
     val pendingConnectionRequest by service.pendingConnectionRequest.collectAsState()
     val connectingTo by service.connectingTo.collectAsState()
     val connectFailure by service.connectFailure.collectAsState()
+    val screenMirrorState by service.screenMirror.state.collectAsState()
+    val connectionState by service.connectionState.collectAsState()
     val settings by service.settingsRepository.settings.collectAsState(initial = null)
     val scope = rememberCoroutineScope()
 
@@ -93,6 +99,25 @@ fun TvAppRoot(service: ConnectItService) {
                     service.settingsRepository.setOnboardingCompleted(true)
                 }
             }
+        }
+        return
+    }
+
+    // 螢幕鏡像的對話框/系統擷取確認沿用手機版元件,放在各個整頁子畫面的提早 return 之前,
+    // 不論在哪一頁都會跳出來。
+    ConnectItTheme(themeMode = AppThemeMode.DARK) {
+        ScreenMirrorHost(service = service)
+    }
+
+    // 觀看對方螢幕:TV 沒有觸控,只提供觀看(按返回鍵結束)。
+    (screenMirrorState as? ScreenMirrorState.Viewing)?.let { viewing ->
+        ConnectItTheme(themeMode = AppThemeMode.DARK) {
+            ScreenViewerScreen(
+                service = service,
+                state = viewing,
+                peerName = (connectionState as? ConnectionUiState.Connected)?.peer?.name ?: "對方",
+                allowInput = false,
+            )
         }
         return
     }

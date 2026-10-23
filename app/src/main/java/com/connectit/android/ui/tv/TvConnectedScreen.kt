@@ -14,6 +14,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CastConnected
+import androidx.compose.material.icons.filled.ScreenShare
+import androidx.compose.material.icons.filled.StopScreenShare
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.DriveFolderUpload
@@ -36,6 +39,7 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import com.connectit.android.model.ConnectedPeer
+import com.connectit.android.screen.ScreenMirrorState
 import com.connectit.android.service.ConnectItService
 import com.connectit.android.ui.components.GradientAvatar
 import com.connectit.android.ui.components.GradientProgressBar
@@ -49,6 +53,7 @@ fun TvConnectionPanel(service: ConnectItService, peer: ConnectedPeer) {
     val context = LocalContext.current
     val transferState by service.transferState.collectAsState()
     val history by service.transferHistory.collectAsState()
+    val screenMirrorState by service.screenMirror.state.collectAsState()
 
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
@@ -101,6 +106,36 @@ fun TvConnectionPanel(service: ConnectItService, peer: ConnectedPeer) {
                     Icon(Icons.Filled.LinkOff, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("中斷連線")
+                }
+            }
+
+            // 螢幕鏡像:TV 主動分享時只能觀看(遙控器不方便確認操控設定);對方請求觀看時的對話框
+            // 仍可以勾選允許操控(見 ScreenMirrorHost)。
+            val sharing = screenMirrorState as? ScreenMirrorState.Sharing
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (sharing != null) {
+                    Icon(Icons.Filled.ScreenShare, contentDescription = null, tint = BrandColors.Success)
+                    Text(
+                        if (sharing.controlActive) "正在分享螢幕(對方可以操控)" else "正在分享螢幕",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    OutlinedButton(onClick = { service.screenMirror.stop() }) {
+                        Icon(Icons.Filled.StopScreenShare, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("停止分享")
+                    }
+                } else {
+                    val idle = screenMirrorState == ScreenMirrorState.Idle
+                    OutlinedButton(onClick = { service.screenMirror.requestViewPeer() }, enabled = idle) {
+                        Icon(Icons.Filled.CastConnected, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("觀看對方螢幕")
+                    }
+                    OutlinedButton(onClick = { service.screenMirror.startShareOffer(allowControl = false) }, enabled = idle) {
+                        Icon(Icons.Filled.ScreenShare, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("分享我的螢幕")
+                    }
                 }
             }
 

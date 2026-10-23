@@ -7,15 +7,21 @@ import java.io.OutputStream
 /**
  * 連線建立後,同一個 socket 用的長度前綴訊框協定,對應 Windows 端 ConnectionService.cs:
  *   [4 bytes big-endian 長度(= 1 個型別 byte + 資料長度)][1 byte 型別][資料]
- * 型別 0 = 控制訊息(UTF-8 JSON),型別 1 = 檔案內容區塊(原始 bytes)。
+ * 型別 0 = 控制訊息(UTF-8 JSON),型別 1 = 檔案內容區塊(原始 bytes),
+ * 型別 2 = 螢幕鏡像控制訊息(UTF-8 JSON,見 [ScreenMessage]),型別 3 = 螢幕畫面(序號 + JPEG)。
+ * 舊版收到 2/3 會直接忽略(兩端的讀取迴圈都只處理認得的型別)。
  */
 object FrameType {
     const val CONTROL: Int = 0
     const val CHUNK: Int = 1
+    const val SCREEN_CONTROL: Int = 2
+    const val SCREEN_FRAME: Int = 3
 }
 
 const val FILE_CHUNK_SIZE = 64 * 1024
-private const val MAX_FRAME_SIZE = 1 * 1024 * 1024
+
+/** 單一訊框(1 型別 byte + 資料)的長度上限,跟 Windows 端一致;螢幕畫面的 JPEG 也要壓在這之內。 */
+const val MAX_FRAME_SIZE = 1 * 1024 * 1024
 
 data class Frame(val type: Int, val payload: ByteArray)
 
