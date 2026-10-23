@@ -2,6 +2,7 @@ package com.connectit.android.screen
 
 import android.content.Context
 import android.media.projection.MediaProjection
+import android.os.Build
 import android.os.SystemClock
 import com.connectit.android.connection.ConnectionEngine
 import com.connectit.android.net.MAX_FRAMES_IN_FLIGHT
@@ -11,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -50,6 +52,8 @@ sealed interface ScreenMirrorState {
         override val sessionId: String,
         val purpose: ProjectionPurpose,
         val allowControl: Boolean,
+        /** 使用者想同時分享聲音:畫面要先要 RECORD_AUDIO 權限,再跳擷取確認。 */
+        val shareAudio: Boolean = false,
     ) : ScreenMirrorState
 
     /**
@@ -62,6 +66,8 @@ sealed interface ScreenMirrorState {
         val controlActive: Boolean,
         val width: Int,
         val height: Int,
+        /** 是否真的在分享聲音(使用者有勾選、有權限、而且成功開始擷取)。 */
+        val shareAudio: Boolean = false,
     ) : ScreenMirrorState
 
     /** 正在看對方的螢幕;[width] 為 0 代表對方還沒送出畫面資訊(剛接受分享)。 */
@@ -75,6 +81,8 @@ sealed interface ScreenMirrorState {
         /** 分享端回報的游標位置(0~1,目前只有 Windows 分享端會送),觸控板模式用來讓圓圈對準真正的游標。 */
         val cursorX: Double? = null,
         val cursorY: Double? = null,
+        /** 對方有分享聲音時的取樣率,沒有聲音時為 null。 */
+        val audioSampleRate: Int? = null,
     ) : ScreenMirrorState
 }
 
@@ -128,9 +136,19 @@ class ScreenMirrorController(
     /** 我方要送出的 ack 與操作事件:用單一工作依序送出,點擊的按下/放開才不會因為並行送出而前後顛倒。 */
     private val outgoing = Channel<ScreenMessage>(Channel.UNLIMITED)
 
+    /** 要送出的聲音片段,由單一工作依序送出;網路塞住時只保留最新的一小段,舊的丟掉(聲音晚到不如不要)。 */
+    private val outgoingAudio = Channel<ByteArray>(capacity = 25, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    // 注意:這個 init 區塊啟動的工作會用到上面宣告的 channel,Kotlin 依宣告順序初始化,
+    // 它們一定要宣告在 init 之前,否則背景工作會讀到還是 null 的欄位(啟動時就閃退)。
     init {
         scope.launch(Dispatchers.IO) {
             for (message in outgoing) engine.sendScreenMessage(message)
+        }
+        scope.launch(Dispatchers.IO) {
+            for (pcm in outgoingAudio) {
+                if (_state.value is ScreenMirrorState.Sharing) engine.sendScreenAudio(pcm, pcm.size)
+            }
         }
         repeat(DECODE_WORKERS) {
             scope.launch(Dispatchers.Default) {
@@ -165,19 +183,19 @@ class ScreenMirrorController(
     }
 
     /** 我要分享我的螢幕:先跳出系統的擷取確認,拿到權限後才送出邀請。 */
-    fun startShareOffer(allowControl: Boolean) = launchConfined {
+    fun startShareOffer(allowControl: Boolean, shareAudio: Boolean = false) = launchConfined {
         if (_state.value != ScreenMirrorState.Idle || !engine.isConnected) return@launchConfined
-        _state.value = ScreenMirrorState.AwaitingProjection(newSessionId(), ProjectionPurpose.OFFER, allowControl)
+        _state.value = ScreenMirrorState.AwaitingProjection(newSessionId(), ProjectionPurpose.OFFER, allowControl, shareAudio)
     }
 
-    fun respondToIncomingRequest(accept: Boolean, allowControl: Boolean) = launchConfined {
+    fun respondToIncomingRequest(accept: Boolean, allowControl: Boolean, shareAudio: Boolean = false) = launchConfined {
         val current = _state.value as? ScreenMirrorState.IncomingRequest ?: return@launchConfined
         if (!accept) {
             send(ScreenMessage(ScreenMessage.REJECT, sessionId = current.sessionId, reason = ScreenRejectReason.DECLINED))
             _state.value = ScreenMirrorState.Idle
             return@launchConfined
         }
-        _state.value = ScreenMirrorState.AwaitingProjection(current.sessionId, ProjectionPurpose.ACCEPT_REQUEST, allowControl)
+        _state.value = ScreenMirrorState.AwaitingProjection(current.sessionId, ProjectionPurpose.ACCEPT_REQUEST, allowControl, shareAudio)
     }
 
     fun respondToIncomingOffer(accept: Boolean) = launchConfined {
@@ -220,9 +238,10 @@ class ScreenMirrorController(
 
         this.projection = projection
         when (current.purpose) {
-            ProjectionPurpose.ACCEPT_REQUEST -> startSharing(current.sessionId, current.allowControl)
+            ProjectionPurpose.ACCEPT_REQUEST -> startSharing(current.sessionId, current.allowControl, current.shareAudio)
             ProjectionPurpose.OFFER -> {
                 pendingOfferAllowControl = current.allowControl
+                pendingOfferShareAudio = current.shareAudio
                 _state.value = ScreenMirrorState.OutgoingOffer(current.sessionId)
                 send(ScreenMessage(ScreenMessage.OFFER, sessionId = current.sessionId))
                 startTimeout(current.sessionId, OFFER_TIMEOUT_MS, "對方沒有回應。對方可能還沒按下接受,或使用的是不支援螢幕鏡像的舊版 ConnectIt。")
@@ -231,6 +250,71 @@ class ScreenMirrorController(
     }
 
     private var pendingOfferAllowControl = false
+    private var pendingOfferShareAudio = false
+
+    // ---- 聲音 ----
+    private var audioCapturer: ScreenAudioCapturer? = null
+    /** 讀取迴圈([handleAudio])也會讀,所以要 @Volatile。 */
+    @Volatile private var audioPlayer: ScreenAudioPlayer? = null
+
+    /** 觀看中是否把對方的聲音靜音(只影響本機播放)。 */
+    @Volatile var audioMuted = false
+        set(value) {
+            field = value
+            audioPlayer?.muted = value
+        }
+
+
+    /** 分享中切換是否同時分享聲音(要先有 RECORD_AUDIO 權限)。 */
+    fun setShareAudio(share: Boolean) = launchConfined {
+        val current = _state.value as? ScreenMirrorState.Sharing ?: return@launchConfined
+        if (current.shareAudio == share) return@launchConfined
+        val started = if (share) startAudioCapture() else {
+            stopAudioCapture()
+            false
+        }
+        if (share && !started) onNotice("無法擷取聲音(需要 Android 10 以上,並允許錄音權限)。")
+        updateSharing(current.copy(shareAudio = started))
+    }
+
+    /** 分享端:用同一個 MediaProjection 開始擷取其他 App 播放的聲音,成功回傳 true。 */
+    private fun startAudioCapture(): Boolean {
+        val projection = projection ?: return false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || !ScreenAudioFormat.hasRecordPermission(context)) return false
+        stopAudioCapture()
+        return try {
+            val capturer = ScreenAudioCapturer(projection) { buffer, length -> outgoingAudio.trySend(buffer.copyOf(length)) }
+            capturer.start()
+            audioCapturer = capturer
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun stopAudioCapture() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) audioCapturer?.stop()
+        audioCapturer = null
+    }
+
+    /** 觀看端:依對方 screen-info 裡的聲音格式建立/重建/關閉播放器。 */
+    private fun updateAudioPlayer(sampleRate: Int?, channels: Int?) {
+        val viewing = _state.value is ScreenMirrorState.Viewing
+        val player = audioPlayer
+        val wantedChannels = channels ?: ScreenAudioFormat.CHANNELS
+        if (viewing && sampleRate != null && sampleRate > 0 && player != null && player.sampleRate == sampleRate && player.channels == wantedChannels) return
+        player?.release()
+        audioPlayer = null
+        if (viewing && sampleRate != null && sampleRate > 0) {
+            audioPlayer = runCatching { ScreenAudioPlayer(sampleRate, wantedChannels).also { it.muted = audioMuted } }.getOrNull()
+        }
+    }
+
+    /** 收到一段聲音(讀取迴圈上呼叫),直接排進播放器的佇列。 */
+    fun handleAudio(pcm: ByteArray) {
+        if (_state.value !is ScreenMirrorState.Viewing) return
+        audioPlayer?.enqueue(pcm)
+    }
 
     /** 取消還在等對方回應的請求/邀請。 */
     fun cancelOutgoing() = launchConfined {
@@ -314,7 +398,7 @@ class ScreenMirrorController(
             }
             ScreenMessage.ACCEPT -> {
                 if (current is ScreenMirrorState.OutgoingOffer && current.sessionId == id) {
-                    startSharing(id, pendingOfferAllowControl)
+                    startSharing(id, pendingOfferAllowControl, pendingOfferShareAudio)
                 }
             }
             ScreenMessage.REJECT -> {
@@ -328,8 +412,12 @@ class ScreenMirrorController(
                     current is ScreenMirrorState.OutgoingRequest && current.sessionId == id -> {
                         startViewing(id)
                         applyInfo(message)
+                        updateAudioPlayer(message.audioSampleRate, message.audioChannels)
                     }
-                    current is ScreenMirrorState.Viewing && current.sessionId == id -> applyInfo(message)
+                    current is ScreenMirrorState.Viewing && current.sessionId == id -> {
+                        applyInfo(message)
+                        updateAudioPlayer(message.audioSampleRate, message.audioChannels)
+                    }
                 }
             }
             ScreenMessage.STOP -> {
@@ -383,6 +471,8 @@ class ScreenMirrorController(
             allowControl = message.allowControl ?: current.allowControl,
             cursorX = message.x ?: current.cursorX,
             cursorY = message.y ?: current.cursorY,
+            // 不能沿用舊值:分享端關掉聲音時就是不帶這個欄位。
+            audioSampleRate = message.audioSampleRate,
         )
     }
 
@@ -398,7 +488,7 @@ class ScreenMirrorController(
         }
     }
 
-    private suspend fun startSharing(id: String, allowControl: Boolean) {
+    private suspend fun startSharing(id: String, allowControl: Boolean, shareAudio: Boolean) {
         cancelTimeout()
         val projection = projection
         if (projection == null) {
@@ -440,7 +530,9 @@ class ScreenMirrorController(
             controlActive = allowControl && ScreenControlAccessibilityService.running.value,
             width = capturer.width,
             height = capturer.height,
+            shareAudio = shareAudio && startAudioCapture(),
         )
+        if (shareAudio && !sharing.shareAudio) onNotice("無法擷取聲音(需要 Android 10 以上,並允許錄音權限),只分享畫面。")
         _state.value = sharing
         sendInfo(sharing)
 
@@ -472,6 +564,8 @@ class ScreenMirrorController(
                 ScreenMessage.INFO, sessionId = sharing.sessionId,
                 width = sharing.width, height = sharing.height,
                 platform = "android", allowControl = sharing.controlActive,
+                audioSampleRate = if (sharing.shareAudio) ScreenAudioFormat.SAMPLE_RATE else null,
+                audioChannels = if (sharing.shareAudio) ScreenAudioFormat.CHANNELS else null,
             )
         )
     }
@@ -507,6 +601,10 @@ class ScreenMirrorController(
         controlWatcherJob?.cancel()
         controlWatcherJob = null
         injector.reset()
+        // 聲音擷取共用同一個 MediaProjection,要在 projection 停掉之前先停。
+        stopAudioCapture()
+        audioPlayer?.release()
+        audioPlayer = null
 
         val hadProjection = projection != null
         capturer?.stop()

@@ -51,6 +51,11 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
   缺服務時 App 會主動跳出說明並直接帶到這個服務的設定頁。Android 13 起側載安裝(非商店)的 App
   開關會是灰的「受限制的設定」,說明裡也有「應用程式資訊 → ⋮ → 允許受限制的設定」的捷徑。
 
+- **螢幕鏡像的聲音(選用)**:分享端用 Android 10+ 的 AudioPlaybackCapture(共用畫面的 MediaProjection,
+  需要錄音權限但不會錄到麥克風)擷取其他 App 播放的聲音,以 16-bit PCM、48kHz 立體聲送出(訊框型別 4);
+  觀看端用 AudioTrack 播放,緩衝超過 200ms 就丟掉新片段,聲音不會越拖越慢。系統限制:只擷取得到允許被擷取
+  的聲音(媒體/遊戲),部分串流 App 為了版權保護會拒絕擷取。Android 9 以下不提供這個選項。
+
 ## 專案結構
 
 | 位置 | 說明 |

@@ -32,6 +32,8 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CallToAction
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
@@ -62,7 +64,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -122,7 +123,7 @@ private class TouchpadSync {
  * 觀看對方的螢幕(全螢幕)。對方允許操控時:
  * - 對方是 Android:手指的觸控原樣轉送(點擊、長按、滑動),下方有返回/主畫面/最近使用。
  * - 對方是電腦,預設「觸控板模式」(跟筆電觸控板一樣):單指滑動移動游標、點一下 = 左鍵、兩指點一下 = 右鍵、
- *   兩指上下滑 = 滾輪、長按後拖曳 = 按住左鍵拖曳;畫面上的圓圈是游標要去的位置。
+ *   兩指上下滑 = 滾輪、長按後拖曳 = 按住左鍵拖曳。
  *   也可以切成「直接點按模式」:點哪裡就按哪裡、長按 = 右鍵、拖曳 = 按住左鍵拖曳、兩指上下滑 = 滾輪。
  *   下方有常用按鍵列。
  * 鍵盤按鈕會叫出軟體鍵盤打字。
@@ -143,6 +144,7 @@ fun ScreenViewerScreen(
     val isRemoteAndroid = state.platform == "android"
 
     var overlayVisible by remember { mutableStateOf(true) }
+    var muted by remember { mutableStateOf(controller.audioMuted) }
     var touchpadMode by remember { mutableStateOf(ViewerPreferences.touchpadMode) }
     // 觸控板模式下游標的位置(0~1 相對座標),從畫面中央開始,之後跟分享端回報的真正游標位置同步。
     // 觸控處理直接讀寫這個 State 物件(不能經過 rememberUpdatedState:那要等下一次重組才會更新,
@@ -236,14 +238,6 @@ fun ScreenViewerScreen(
             drawIntoCanvas { canvas ->
                 canvas.nativeCanvas.drawBitmap(bitmap, null, fit, paint)
             }
-            if (useTouchpad) {
-                // 本機先畫出游標的目標位置:畫面裡對方的游標要等下一張畫面才會動,這個圓圈是即時的。
-                val cursor = cursorState.value
-                val center = Offset(fit.left + cursor.x * fit.width(), fit.top + cursor.y * fit.height())
-                val radius = 9.dp.toPx()
-                drawCircle(Color.Black.copy(alpha = 0.6f), radius = radius + 2.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
-                drawCircle(Color.White, radius = radius, center = center, style = Stroke(width = 2.dp.toPx()))
-            }
         }
 
         if (currentFrame == null) {
@@ -293,6 +287,11 @@ fun ScreenViewerScreen(
                         keyboardFocus.requestFocus()
                         keyboardController?.show()
                     },
+                    muted = if (state.audioSampleRate != null) muted else null,
+                    onToggleMute = {
+                        muted = !muted
+                        controller.audioMuted = muted
+                    },
                     onHide = { overlayVisible = false },
                     onStop = { controller.stop() },
                 )
@@ -330,6 +329,9 @@ private fun ViewerTopBar(
     touchpadMode: Boolean?,
     onToggleTouchpad: () -> Unit,
     onKeyboard: () -> Unit,
+    /** null = 對方沒有分享聲音,不顯示靜音鈕。 */
+    muted: Boolean?,
+    onToggleMute: () -> Unit,
     onHide: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -362,6 +364,14 @@ private fun ViewerTopBar(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(if (touchpadMode) "觸控板" else "直接點按", color = Color.White)
+                }
+            }
+            if (muted != null) {
+                IconButton(onClick = onToggleMute) {
+                    Icon(
+                        if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                        contentDescription = if (muted) "取消靜音" else "靜音",
+                    )
                 }
             }
             if (canControl) {
@@ -652,7 +662,7 @@ private suspend fun PointerInputScope.handleTouchpad(
                     sendAtCursor(ScreenInputAction.POINTER_UP, 0)
                 }
                 moved -> sendAtCursor(ScreenInputAction.POINTER_MOVE, null) // 確保最後的位置有送到。
-                // 沒移動、也沒長按到開始拖曳:點擊(單指 = 左鍵、兩指 = 右鍵)。先送一次移動,確保點在圓圈的位置。
+                // 沒移動、也沒長按到開始拖曳:點擊(單指 = 左鍵、兩指 = 右鍵)。先送一次移動,確保點在目前游標的位置。
                 else -> {
                     sendAtCursor(ScreenInputAction.POINTER_MOVE, null)
                     val button = if (maxPointers >= 2) 1 else 0

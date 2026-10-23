@@ -9,6 +9,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- 螢幕鏡像:分享螢幕期間前景服務要多宣告 mediaProjection 類型(Android 14 起需要這個權限)。 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- 螢幕鏡像「同時分享聲音」:Android 10+ 的 AudioPlaybackCapture(擷取其他 App 播放的聲音)要求這個權限,
+         不會用到麥克風。 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 只有 API 28(Android 9)以下的裝置需要:寫入公用 Download 資料夾。API 29 起改用
          MediaStore.Downloads,不需要這個權限。 -->
@@ -18,6 +21,8 @@
          裝置沒有觸控螢幕(TV)或沒有 leanback(手機/平板)都不會被 Play 商店擋掉安裝。 -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <!-- RECORD_AUDIO(螢幕鏡像分享聲音)會讓系統預設認為需要麥克風;實際上不用麥克風,沒有麥克風的 TV 也要能安裝。 -->
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
     <application
         android:name=".ConnectItApplication"

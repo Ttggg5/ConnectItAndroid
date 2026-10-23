@@ -668,6 +668,7 @@ class ConnectItService : LifecycleService() {
         connectionEngine.onStatusChanged = { pushLog(it) }
         connectionEngine.onScreenMessage = { screenMirror.handleMessage(it) }
         connectionEngine.onScreenFrame = { screenMirror.handleFrame(it) }
+        connectionEngine.onScreenAudio = { screenMirror.handleAudio(it) }
 
         connectionEngine.onConnectionRequested = { request ->
             val isTrusted = cachedSettings.trustedDeviceNames.any { it.equals(request.requesterName, ignoreCase = true) }

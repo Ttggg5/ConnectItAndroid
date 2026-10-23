@@ -1,5 +1,6 @@
 package com.connectit.android.ui.components
 
+import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.media.projection.MediaProjectionManager
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CastConnected
 import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.StopScreenShare
@@ -37,6 +39,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -46,6 +49,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.connectit.android.screen.ScreenAudioFormat
 import com.connectit.android.screen.ScreenControlAccessibilityService
 import com.connectit.android.screen.ScreenMirrorState
 import com.connectit.android.service.ConnectItService
@@ -71,22 +75,37 @@ fun ScreenMirrorHost(service: ConnectItService) {
         service.onScreenCapturePermissionResult(result.resultCode, result.data)
     }
 
-    // 同一個工作階段只跳一次系統確認:旋轉螢幕重建畫面時狀態還是 AwaitingProjection,不能再跳第二次。
-    var launchedForSession by rememberSaveable { mutableStateOf<String?>(null) }
-    val awaiting = state as? ScreenMirrorState.AwaitingProjection
-    LaunchedEffect(awaiting?.sessionId) {
-        val sessionId = awaiting?.sessionId ?: return@LaunchedEffect
-        if (launchedForSession == sessionId) return@LaunchedEffect
-        launchedForSession = sessionId
+    fun launchProjection() {
         val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
         if (manager == null) {
             controller.onProjectionResult(null, unsupported = true)
-            return@LaunchedEffect
+            return
         }
         try {
             projectionLauncher.launch(manager.createScreenCaptureIntent())
         } catch (e: ActivityNotFoundException) {
             controller.onProjectionResult(null, unsupported = true)
+        }
+    }
+
+    // 要同時分享聲音時先要錄音權限(AudioPlaybackCapture 需要),不管同不同意都接著跳擷取確認;
+    // 沒有權限時控制器會只分享畫面並提示。
+    val launchProjectionLatest by rememberUpdatedState(::launchProjection)
+    val audioPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        launchProjectionLatest()
+    }
+
+    // 同一個工作階段只跳一次系統確認:旋轉螢幕重建畫面時狀態還是 AwaitingProjection,不能再跳第二次。
+    var launchedForSession by rememberSaveable { mutableStateOf<String?>(null) }
+    val awaiting = state as? ScreenMirrorState.AwaitingProjection
+    LaunchedEffect(awaiting?.sessionId) {
+        val current = awaiting ?: return@LaunchedEffect
+        if (launchedForSession == current.sessionId) return@LaunchedEffect
+        launchedForSession = current.sessionId
+        if (current.shareAudio && ScreenAudioFormat.captureSupported && !ScreenAudioFormat.hasRecordPermission(context)) {
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            launchProjection()
         }
     }
 
@@ -105,7 +124,7 @@ fun ScreenMirrorHost(service: ConnectItService) {
     when (val current = state) {
         is ScreenMirrorState.IncomingRequest -> IncomingScreenRequestDialog(
             peerName = peerName,
-            onRespond = { accept, allowControl -> controller.respondToIncomingRequest(accept, allowControl) },
+            onRespond = { accept, allowControl, shareAudio -> controller.respondToIncomingRequest(accept, allowControl, shareAudio) },
         )
         is ScreenMirrorState.IncomingOffer -> IncomingScreenOfferDialog(
             peerName = peerName,
@@ -143,6 +162,7 @@ fun ScreenMirrorSection(service: ConnectItService, modifier: Modifier = Modifier
             is ScreenMirrorState.Sharing -> SharingCard(
                 state = current,
                 onAllowControlChange = { controller.setAllowControl(it) },
+                onShareAudioChange = { controller.setShareAudio(it) },
                 onStop = { controller.stop() },
             )
             else -> {
@@ -171,9 +191,9 @@ fun ScreenMirrorSection(service: ConnectItService, modifier: Modifier = Modifier
 
     if (showShareDialog) {
         ShareScreenDialog(
-            onConfirm = { allowControl ->
+            onConfirm = { allowControl, shareAudio ->
                 showShareDialog = false
-                controller.startShareOffer(allowControl)
+                controller.startShareOffer(allowControl, shareAudio)
             },
             onDismiss = { showShareDialog = false },
         )
@@ -184,10 +204,15 @@ fun ScreenMirrorSection(service: ConnectItService, modifier: Modifier = Modifier
 private fun SharingCard(
     state: ScreenMirrorState.Sharing,
     onAllowControlChange: (Boolean) -> Unit,
+    onShareAudioChange: (Boolean) -> Unit,
     onStop: () -> Unit,
 ) {
     val context = LocalContext.current
     val accessibilityRunning by ScreenControlAccessibilityService.running.collectAsState()
+    // 分享到一半才打開聲音、但還沒有錄音權限:先要權限,同意才真的打開。
+    val audioPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) onShareAudioChange(true)
+    }
 
     Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
         Column(Modifier.padding(14.dp)) {
@@ -209,6 +234,23 @@ private fun SharingCard(
                 Spacer(Modifier.width(8.dp))
                 Text("允許對方操控", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                 Switch(checked = state.allowControl, onCheckedChange = onAllowControlChange)
+            }
+            if (ScreenAudioFormat.captureSupported) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.width(8.dp))
+                    Text("同時分享聲音", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = state.shareAudio,
+                        onCheckedChange = { share ->
+                            if (share && !ScreenAudioFormat.hasRecordPermission(context)) {
+                                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            } else {
+                                onShareAudioChange(share)
+                            }
+                        },
+                    )
+                }
             }
             if (state.allowControl && !accessibilityRunning) {
                 Spacer(Modifier.height(6.dp))
@@ -323,9 +365,30 @@ private fun AllowControlCheckbox(checked: Boolean, onCheckedChange: (Boolean) ->
     }
 }
 
+/** 「同時分享聲音」:只有 Android 10+ 能擷取其他 App 的聲音;預設勾選(一起看影片時大多也想要聲音)。 */
 @Composable
-private fun ShareScreenDialog(onConfirm: (allowControl: Boolean) -> Unit, onDismiss: () -> Unit) {
+private fun ShareAudioCheckbox(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    if (!ScreenAudioFormat.captureSupported) return
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.clickable { onCheckedChange(!checked) }.padding(end = 8.dp),
+    ) {
+        Checkbox(checked = checked, onCheckedChange = onCheckedChange)
+        Column {
+            Text("同時分享聲音", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "對方可以聽到這台裝置播放的影片、音樂與遊戲聲音(不會錄到麥克風)。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ShareScreenDialog(onConfirm: (allowControl: Boolean, shareAudio: Boolean) -> Unit, onDismiss: () -> Unit) {
     var allowControl by remember { mutableStateOf(false) }
+    var shareAudio by remember { mutableStateOf(true) }
     MirrorDialog(onDismissRequest = onDismiss) {
         GradientAvatar(icon = Icons.Filled.ScreenShare, size = 64.dp)
         Spacer(Modifier.height(16.dp))
@@ -338,19 +401,21 @@ private fun ShareScreenDialog(onConfirm: (allowControl: Boolean) -> Unit, onDism
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(12.dp))
+        ShareAudioCheckbox(checked = shareAudio, onCheckedChange = { shareAudio = it })
         AllowControlCheckbox(checked = allowControl, onCheckedChange = { allowControl = it })
         Spacer(Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
             GhostButton(onClick = onDismiss, text = "取消", modifier = Modifier.weight(1f))
-            GradientButton(onClick = { onConfirm(allowControl) }, text = "開始分享", modifier = Modifier.weight(1f))
+            GradientButton(onClick = { onConfirm(allowControl, shareAudio) }, text = "開始分享", modifier = Modifier.weight(1f))
         }
     }
 }
 
 @Composable
-private fun IncomingScreenRequestDialog(peerName: String, onRespond: (accept: Boolean, allowControl: Boolean) -> Unit) {
+private fun IncomingScreenRequestDialog(peerName: String, onRespond: (accept: Boolean, allowControl: Boolean, shareAudio: Boolean) -> Unit) {
     var allowControl by remember { mutableStateOf(false) }
-    MirrorDialog(onDismissRequest = { onRespond(false, false) }) {
+    var shareAudio by remember { mutableStateOf(true) }
+    MirrorDialog(onDismissRequest = { onRespond(false, false, false) }) {
         GradientAvatar(icon = Icons.Filled.ScreenShare, size = 72.dp)
         Spacer(Modifier.height(16.dp))
         Text("螢幕鏡像", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -364,11 +429,12 @@ private fun IncomingScreenRequestDialog(peerName: String, onRespond: (accept: Bo
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(12.dp))
+        ShareAudioCheckbox(checked = shareAudio, onCheckedChange = { shareAudio = it })
         AllowControlCheckbox(checked = allowControl, onCheckedChange = { allowControl = it })
         Spacer(Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-            GhostButton(onClick = { onRespond(false, false) }, text = "拒絕", modifier = Modifier.weight(1f))
-            GradientButton(onClick = { onRespond(true, allowControl) }, text = "同意", modifier = Modifier.weight(1f))
+            GhostButton(onClick = { onRespond(false, false, false) }, text = "拒絕", modifier = Modifier.weight(1f))
+            GradientButton(onClick = { onRespond(true, allowControl, shareAudio) }, text = "同意", modifier = Modifier.weight(1f))
         }
     }
 }

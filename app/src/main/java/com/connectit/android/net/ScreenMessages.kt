@@ -19,6 +19,10 @@ import org.json.JSONObject
  * 畫面尺寸改變(旋轉)或是否允許操控改變時 sharer 會再送一次 screen-info。允許操控時 viewer 可以送
  * screen-input。任一方送 screen-stop 結束。同一時間只會有一個螢幕鏡像工作階段。
  *
+ * 聲音(選用):sharer 在 screen-info 帶上 [audioSampleRate]/[audioChannels] 代表有分享聲音,之後送
+ * [FrameType.SCREEN_AUDIO](16-bit little-endian PCM,交錯排列);不帶代表沒有分享聲音。聲音不受畫面的
+ * ack 流量控制,沒聲音(全部是 0)的片段不送。
+ *
  * 舊版(不支援螢幕鏡像)收到不認得的訊框型別會直接忽略,所以發起端要自己逾時(見 ScreenMirrorController)。
  */
 data class ScreenMessage(
@@ -44,6 +48,10 @@ data class ScreenMessage(
     val text: String? = null,
     /** screen-reject / screen-stop 的原因:見 [ScreenRejectReason]。 */
     val reason: String? = null,
+    /** screen-info:分享端有分享聲音時的取樣率(例如 48000),沒有分享聲音時為 null。 */
+    val audioSampleRate: Int? = null,
+    /** screen-info:聲音的聲道數(目前一律是 2)。 */
+    val audioChannels: Int? = null,
 ) {
     fun toJson(): ByteArray {
         val obj = JSONObject()
@@ -62,6 +70,8 @@ data class ScreenMessage(
         if (key != null) obj.put("Key", key)
         if (text != null) obj.put("Text", text)
         if (reason != null) obj.put("Reason", reason)
+        if (audioSampleRate != null) obj.put("AudioSampleRate", audioSampleRate)
+        if (audioChannels != null) obj.put("AudioChannels", audioChannels)
         return obj.toString().toByteArray(Charsets.UTF_8)
     }
 
@@ -93,6 +103,8 @@ data class ScreenMessage(
                 key = obj.optStringOrNull("Key"),
                 text = obj.optStringOrNull("Text"),
                 reason = obj.optStringOrNull("Reason"),
+                audioSampleRate = obj.optIntOrNull("AudioSampleRate"),
+                audioChannels = obj.optIntOrNull("AudioChannels"),
             )
         }.getOrNull()
     }

@@ -63,6 +63,24 @@ class ScreenMessagesTest {
     }
 
     @Test
+    fun `audio format fields use PascalCase and round-trip`() {
+        val original = ScreenMessage(ScreenMessage.INFO, sessionId = "s1", audioSampleRate = 48000, audioChannels = 2)
+        val json = String(original.toJson(), Charsets.UTF_8)
+
+        assertTrue(json.contains("\"AudioSampleRate\":48000"))
+        assertTrue(json.contains("\"AudioChannels\":2"))
+        assertEquals(original, ScreenMessage.parse(original.toJson()))
+    }
+
+    @Test
+    fun `info without audio fields means no audio`() {
+        val parsed = ScreenMessage.parse("""{"Type":"screen-info","SessionId":"s1","Width":1920,"Height":1080}""".toByteArray())!!
+
+        assertNull(parsed.audioSampleRate)
+        assertNull(parsed.audioChannels)
+    }
+
+    @Test
     fun `parse returns null for malformed json`() {
         assertNull(ScreenMessage.parse("not json".toByteArray()))
         assertNull(ScreenMessage.parse("""{"SessionId":"missing type"}""".toByteArray()))

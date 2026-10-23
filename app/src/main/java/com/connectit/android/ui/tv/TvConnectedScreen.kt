@@ -39,6 +39,7 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
 import com.connectit.android.model.ConnectedPeer
+import com.connectit.android.screen.ScreenAudioFormat
 import com.connectit.android.screen.ScreenMirrorState
 import com.connectit.android.service.ConnectItService
 import com.connectit.android.ui.components.GradientAvatar
@@ -131,7 +132,7 @@ fun TvConnectionPanel(service: ConnectItService, peer: ConnectedPeer) {
                         Spacer(Modifier.width(8.dp))
                         Text("觀看對方螢幕")
                     }
-                    OutlinedButton(onClick = { service.screenMirror.startShareOffer(allowControl = false) }, enabled = idle) {
+                    OutlinedButton(onClick = { service.screenMirror.startShareOffer(allowControl = false, shareAudio = ScreenAudioFormat.captureSupported) }, enabled = idle) {
                         Icon(Icons.Filled.ScreenShare, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
                         Text("分享我的螢幕")

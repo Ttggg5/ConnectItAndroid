@@ -95,6 +95,9 @@ class ConnectionEngine(
     /** 收到一張螢幕畫面:payload 是 [序號 4 bytes][JPEG],在讀取迴圈上呼叫,解碼請另外開工作。 */
     var onScreenFrame: ((ByteArray) -> Unit)? = null
 
+    /** 收到一段螢幕鏡像的聲音(16-bit PCM),在讀取迴圈上呼叫,不能阻塞。 */
+    var onScreenAudio: ((ByteArray) -> Unit)? = null
+
     @Volatile private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
 
@@ -316,6 +319,7 @@ class ConnectionEngine(
                         FrameType.CHUNK -> handleChunkFrame(frame.payload)
                         FrameType.SCREEN_CONTROL -> ScreenMessage.parse(frame.payload)?.let { onScreenMessage?.invoke(it) }
                         FrameType.SCREEN_FRAME -> onScreenFrame?.invoke(frame.payload)
+                        FrameType.SCREEN_AUDIO -> onScreenAudio?.invoke(frame.payload)
                     }
                 }
             } catch (e: CancellationException) {
@@ -401,6 +405,11 @@ class ConnectionEngine(
     /** [payload] 前 4 bytes 必須已經填好 big-endian 的畫面序號,後面接 JPEG 內容,總長 [length]。 */
     suspend fun sendScreenFrame(payload: ByteArray, length: Int) {
         writeRaw(FrameType.SCREEN_FRAME, payload, length)
+    }
+
+    /** 送出一段螢幕鏡像的聲音(16-bit little-endian PCM)。 */
+    suspend fun sendScreenAudio(pcm: ByteArray, length: Int) {
+        writeRaw(FrameType.SCREEN_AUDIO, pcm, length)
     }
 
     private fun launchWrite(message: FileControlMessage) {
