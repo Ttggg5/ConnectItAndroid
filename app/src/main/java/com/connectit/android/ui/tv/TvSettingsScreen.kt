@@ -121,17 +121,17 @@ fun TvSettingsScreen(service: ConnectItService) {
                 "信任的裝置送出連線請求時會直接自動接受,不再跳出確認對話框。",
                 style = MaterialTheme.typography.bodySmall,
             )
-            if (settings.trustedDeviceNames.isEmpty()) {
+            if (settings.trustedDevices.isEmpty()) {
                 Text("目前沒有信任的裝置(可在收到連線請求時勾選「信任此裝置」加入)。", style = MaterialTheme.typography.bodySmall)
             } else {
-                settings.trustedDeviceNames.sorted().forEach { name ->
+                settings.trustedDevices.sortedBy { it.name.lowercase() }.forEach { device ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(name)
-                        IconButton(onClick = { scope.launch { service.settingsRepository.untrustDevice(name) } }) {
+                        Text(device.name)
+                        IconButton(onClick = { scope.launch { service.settingsRepository.untrustDevice(device.fingerprint) } }) {
                             Icon(Icons.Filled.Close, contentDescription = "移除信任")
                         }
                     }

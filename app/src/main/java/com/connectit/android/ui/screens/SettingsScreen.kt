@@ -236,9 +236,9 @@ fun SettingsScreen(
             SettingsGroup(
                 title = "信任的裝置",
                 icon = Icons.Filled.VerifiedUser,
-                description = "信任的裝置送出連線請求時會自動接受,不再跳出確認視窗。",
+                description = "信任的裝置送出連線請求時會自動接受,不再跳出確認視窗。只認裝置本身的加密金鑰,改名或冒名都不會被自動接受;舊版的信任紀錄需要重新配對一次。",
             ) {
-                if (settings.trustedDeviceNames.isEmpty()) {
+                if (settings.trustedDevices.isEmpty()) {
                     Text(
                         "目前沒有信任的裝置。收到連線請求時勾選「信任此裝置」即可加入。",
                         style = MaterialTheme.typography.bodySmall,
@@ -247,7 +247,7 @@ fun SettingsScreen(
                     )
                 } else {
                     Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        settings.trustedDeviceNames.sorted().forEach { name ->
+                        settings.trustedDevices.sortedBy { it.name.lowercase() }.forEach { device ->
                             Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
                                 Row(
                                     Modifier.fillMaxWidth().padding(start = 14.dp),
@@ -255,8 +255,8 @@ fun SettingsScreen(
                                 ) {
                                     Icon(Icons.Filled.Devices, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(10.dp))
-                                    Text(name, modifier = Modifier.weight(1f))
-                                    IconButton(onClick = { scope.launch { repo.untrustDevice(name) } }) {
+                                    Text(device.name, modifier = Modifier.weight(1f))
+                                    IconButton(onClick = { scope.launch { repo.untrustDevice(device.fingerprint) } }) {
                                         Icon(Icons.Filled.Close, contentDescription = "取消信任")
                                     }
                                 }

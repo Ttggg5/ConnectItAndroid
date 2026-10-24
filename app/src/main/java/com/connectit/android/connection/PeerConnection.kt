@@ -60,6 +60,10 @@ class PeerConnection internal constructor(
     val address: String,
     /** 對方在交握時帶上的穩定裝置識別碼(舊版沒有時為 null)。 */
     val remoteDeviceId: String?,
+    /** 對方 TLS 憑證的指紋(見 [DeviceIdentity.fingerprint]),信任裝置靠這個比對。 */
+    val remoteFingerprint: String,
+    /** 這條連線的 6 位數配對碼(見 [DeviceIdentity.pairingCode])。 */
+    val pairingCode: String,
     private val customDownloadFolderProvider: () -> Uri?,
 ) {
     private val contentResolver: ContentResolver get() = context.contentResolver

@@ -93,7 +93,7 @@ class NsdDiscoveryManager(
 
     /** 把這台裝置廣播出去。每次呼叫都用新的短碼後綴產生新的實體名稱,避免重新廣播(例如換了連接埠)
      * 時跟前一次殘留的註冊/快取記錄混在一起。 */
-    fun advertise(deviceName: String, port: Int) {
+    fun advertise(deviceName: String, port: Int, properties: Map<String, String> = emptyMap()) {
         stopAdvertising()
 
         val friendlyName = deviceName.ifBlank { Build.MODEL }.replace('.', '-')
@@ -105,6 +105,7 @@ class NsdDiscoveryManager(
             this.serviceType = this@NsdDiscoveryManager.serviceType
             this.port = port
             setAttribute("name", friendlyName)
+            properties.forEach { (key, value) -> setAttribute(key, value) }
         }
 
         val listener = object : NsdManager.RegistrationListener {
@@ -189,7 +190,7 @@ class NsdDiscoveryManager(
         // 不管名稱或連接埠是不是對得上,一定是自己,直接過濾掉。
         if (isLocalAddress(address)) return
 
-        val friendlyName = readFriendlyNameAttribute(info)
+        val friendlyName = readAttribute(info, "name")
 
         onDeviceDiscovered?.invoke(
             DiscoveredDevice(
@@ -197,12 +198,15 @@ class NsdDiscoveryManager(
                 host = address.hostAddress ?: address.toString(),
                 port = info.port,
                 friendlyName = friendlyName,
+                deviceId = readAttribute(info, "id"),
+                // 讀得到 TXT(有 name)但沒有 "v" 的是不支援加密連線的舊版(第 1 版);讀不到 TXT 時不知道,先不判斷。
+                protocolVersion = if (friendlyName == null) null else readAttribute(info, "v")?.toIntOrNull() ?: 1,
             )
         )
     }
 
-    private fun readFriendlyNameAttribute(info: NsdServiceInfo): String? = runCatching {
-        info.attributes["name"]?.let { String(it, Charsets.UTF_8) }
+    private fun readAttribute(info: NsdServiceInfo, key: String): String? = runCatching {
+        info.attributes[key]?.let { String(it, Charsets.UTF_8) }
     }.getOrNull()
 
     /** 每次都重新列舉,避免快取到 Wi-Fi 重新連線、切換網路後已經失效的舊位址。 */

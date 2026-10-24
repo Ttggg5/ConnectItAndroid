@@ -151,6 +151,8 @@ private fun TvDeviceCard(device: DiscoveredDevice, isConnected: Boolean, onConne
                 Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = BrandColors.Success)
                 Spacer(Modifier.width(8.dp))
                 Text("已連線", style = MaterialTheme.typography.titleMedium, color = BrandColors.Success)
+            } else if (device.needsUpdate) {
+                Text("需要更新", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 Text("按 OK 連線", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
             }

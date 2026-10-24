@@ -26,6 +26,7 @@ import androidx.lifecycle.lifecycleScope
 import com.connectit.android.MainActivity
 import com.connectit.android.R
 import com.connectit.android.connection.ConnectionEngine
+import com.connectit.android.connection.DeviceIdentity
 import com.connectit.android.connection.PeerConnection
 import com.connectit.android.discovery.NsdDiscoveryManager
 import com.connectit.android.model.ConnectedPeer
@@ -55,6 +56,7 @@ import com.connectit.android.video.VideoHostServer
 import com.connectit.android.video.VideoServerPlaybackOptions
 import com.connectit.android.video.VideoSort
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -70,6 +72,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.ceil
 import kotlin.random.Random
@@ -220,6 +223,10 @@ class ConnectItService : LifecycleService() {
     val connectingTo: StateFlow<DiscoveredDevice?> = _connectingTo.asStateFlow()
     private var connectJob: Job? = null
 
+    /** 等待對方接受時顯示的配對碼(加密連線建立後才有)。 */
+    private val _connectingPairingCode = MutableStateFlow<String?>(null)
+    val connectingPairingCode: StateFlow<String?> = _connectingPairingCode.asStateFlow()
+
     private val _connectFailure = MutableStateFlow<ConnectFailure?>(null)
     val connectFailure: StateFlow<ConnectFailure?> = _connectFailure.asStateFlow()
 
@@ -301,11 +308,19 @@ class ConnectItService : LifecycleService() {
         }
 
         lifecycleScope.launch {
-            connectionEngine.localDeviceId = settingsRepository.getOrCreateDeviceId()
+            val deviceId = settingsRepository.getOrCreateDeviceId()
+            connectionEngine.localDeviceId = deviceId
+            connectionEngine.identity = withContext(Dispatchers.IO) {
+                runCatching { DeviceIdentity.loadOrCreate() }
+                    .onFailure { pushLog("無法建立裝置的加密金鑰:${it.message}") }
+                    .getOrNull()
+            }
             val preferredPort = settingsRepository.settings.first().preferredPort
             val port = connectionEngine.startListening(preferredPort)
+            // TXT 另外帶協定版本("v",舊版看到也不影響)與裝置識別碼("id")。
+            val properties = mapOf("v" to ConnectionEngine.PROTOCOL_VERSION.toString(), "id" to deviceId)
             settingsRepository.settings.map { it.deviceName }.distinctUntilChanged().collect { name ->
-                deviceDiscovery.advertise(name, port)
+                deviceDiscovery.advertise(name, port, properties)
             }
         }
 
@@ -344,11 +359,19 @@ class ConnectItService : LifecycleService() {
      */
     fun connectTo(device: DiscoveredDevice, myDeviceName: String, onAccepted: (() -> Unit)? = null) {
         if (connectJob?.isActive == true) return
+        if (device.needsUpdate) {
+            _connectFailure.value = ConnectFailure(device.displayName, ConnectionRequestOutcome.INCOMPATIBLE_VERSION)
+            return
+        }
         _connectFailure.value = null
+        _connectingPairingCode.value = null
         _connectingTo.value = device
         connectJob = lifecycleScope.launch {
             try {
-                val outcome = connectionEngine.requestConnection(device.host, device.port, myDeviceName, device.displayName)
+                val outcome = connectionEngine.requestConnection(
+                    device.host, device.port, myDeviceName, device.displayName,
+                    onPairingCode = { _connectingPairingCode.value = it },
+                )
                 if (outcome == ConnectionRequestOutcome.ACCEPTED) {
                     onAccepted?.invoke()
                 } else {
@@ -357,6 +380,7 @@ class ConnectItService : LifecycleService() {
                         when (outcome) {
                             ConnectionRequestOutcome.REJECTED -> "${device.displayName} 拒絕了連線請求。"
                             ConnectionRequestOutcome.TIMEOUT -> "${device.displayName} 沒有回應連線請求。"
+                            ConnectionRequestOutcome.INCOMPATIBLE_VERSION -> "${device.displayName} 使用的是不支援加密連線的舊版 ConnectIt。"
                             else -> "連不到 ${device.displayName}。"
                         }
                     )
@@ -366,6 +390,7 @@ class ConnectItService : LifecycleService() {
                 throw e
             } finally {
                 _connectingTo.value = null
+                _connectingPairingCode.value = null
             }
         }
     }
@@ -458,7 +483,7 @@ class ConnectItService : LifecycleService() {
         clearConnectionRequestNotification()
 
         if (accept && trust && request != null) {
-            lifecycleScope.launch { settingsRepository.trustDevice(request.requesterName) }
+            lifecycleScope.launch { settingsRepository.trustDevice(request.requesterFingerprint, request.requesterName, request.requesterDeviceId) }
         }
     }
 
@@ -770,7 +795,7 @@ class ConnectItService : LifecycleService() {
         connectionEngine.onScreenAudio = { peer, pcm -> screenMirror.handleAudio(peer, pcm) }
 
         connectionEngine.onConnectionRequested = { request ->
-            val isTrusted = cachedSettings.trustedDeviceNames.any { it.equals(request.requesterName, ignoreCase = true) }
+            val isTrusted = cachedSettings.trustedDevices.any { it.fingerprint.equals(request.requesterFingerprint, ignoreCase = true) }
             if (isTrusted) {
                 request.respond(true)
                 pushLog("已自動接受信任裝置「${request.requesterName}」的連線請求。")

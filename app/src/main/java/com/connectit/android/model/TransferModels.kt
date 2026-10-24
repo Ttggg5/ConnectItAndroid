@@ -14,6 +14,8 @@ enum class ConnectionRequestOutcome {
     TIMEOUT,
     /** 根本連不上對方(離線、位址不可達、被防火牆擋下)。 */
     UNREACHABLE,
+    /** 連得上但建立不了加密連線,通常是對方使用不支援加密的舊版 ConnectIt。 */
+    INCOMPATIBLE_VERSION,
 }
 
 /**
@@ -53,6 +55,10 @@ data class ConnectionRequest(
     val requesterAddress: String,
     /** 對方的穩定裝置識別碼(舊版沒有時為 null)。 */
     val requesterDeviceId: String?,
+    /** 對方 TLS 憑證的指紋,信任清單靠這個比對(不比對名稱,名稱可以被冒用)。 */
+    val requesterFingerprint: String,
+    /** 這次連線的 6 位數配對碼,兩邊畫面都會顯示,讓使用者核對。 */
+    val pairingCode: String,
     val respond: (Boolean) -> Unit,
 )
 

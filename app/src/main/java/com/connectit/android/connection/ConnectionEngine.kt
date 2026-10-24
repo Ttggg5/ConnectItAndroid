@@ -29,13 +29,20 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
+import javax.net.ssl.SSLSocket
 
 private const val REQUEST_TIMEOUT_MS = 10_000
 private const val RESPONSE_TIMEOUT_MS = 60_000
 private const val DEFAULT_CONNECT_TIMEOUT_MS = 10_000
+// TLS 握手的逾時:對方是不支援 TLS 的舊版時,它會把 ClientHello 當成一行文字等(10 秒後放棄),
+// 這裡要等得比它久,才拿得到「對方關掉連線」而不是自己先逾時。
+private const val TLS_HANDSHAKE_TIMEOUT_MS = 15_000
 
 /**
- * mDNS 找到裝置之後的實際 TCP 連線邏輯:監聽、連線請求/接受/拒絕交握。交握成功後每台裝置各有一個
+ * mDNS 找到裝置之後的實際 TCP 連線邏輯:監聽、連線請求/接受/拒絕交握。協定第 2 版起整條連線都加密:
+ * TCP 連上後先做雙向 TLS(接受端是 TLS 伺服器、發起端是用戶端,兩邊都出示自己的 [DeviceIdentity] 憑證,
+ * 握手時不驗證憑證鏈,身分由畫面上的配對碼與信任清單裡的指紋確認),之後才是原本的 request/accept 交握。
+ * 舊版(明文)發起端會直接送 JSON,TLS 握手失敗後直接關閉連線(舊版看到的結果跟被拒絕一樣)。交握成功後每台裝置各有一個
  * [PeerConnection](檔案/資料夾傳輸訊框協定、心跳斷線偵測、螢幕鏡像訊框都在那裡),所以可以同時連線
  * 多台裝置。逐一對應 Windows 端的 ConnectionService.cs / PeerSession.cs,詳細協定說明見該檔案
  * 與 [com.connectit.android.net] 底下幾個檔案開頭的註解。
@@ -55,6 +62,9 @@ class ConnectionEngine(
 
     /** 這台裝置的穩定識別碼(見 SettingsRepository.deviceId),交握時送給對方。 */
     @Volatile var localDeviceId: String = UUID.randomUUID().toString().replace("-", "")
+
+    /** 這台裝置的 TLS 身分,開始監聽前由服務設定(見 [DeviceIdentity.loadOrCreate])。 */
+    @Volatile var identity: DeviceIdentity? = null
 
     var onConnectionRequested: ((ConnectionRequest) -> Unit)? = null
     var onConnected: ((PeerConnection) -> Unit)? = null
@@ -129,9 +139,30 @@ class ConnectionEngine(
         onStatusChanged?.invoke("收到來自 $remoteAddress 的連線嘗試。")
 
         try {
-            socket.soTimeout = REQUEST_TIMEOUT_MS
-            val input = socket.getInputStream()
-            val output = socket.getOutputStream()
+            runCatching { socket.tcpNoDelay = true }
+            val identity = identity ?: run {
+                socket.closeQuietly()
+                return
+            }
+            // Android 沒辦法先偷看第一個 byte 再交給 TLS(Windows 端可以,會回明文的 upgrade-required):
+            // 舊版的明文請求在這裡會讓 TLS 握手失敗、直接關閉連線,舊版那邊看到的結果跟被拒絕一樣。
+            val ssl = identity.socketFactory.createSocket(socket, remoteAddress, socket.port, true) as SSLSocket
+            ssl.useClientMode = false
+            ssl.needClientAuth = true
+            ssl.soTimeout = TLS_HANDSHAKE_TIMEOUT_MS
+            try {
+                ssl.startHandshake()
+            } catch (e: Exception) {
+                onStatusChanged?.invoke("無法和 $remoteAddress 建立加密連線,對方可能使用的是不支援加密的舊版 ConnectIt。")
+                ssl.closeQuietly()
+                return
+            }
+            val remoteFingerprint = DeviceIdentity.fingerprintOf(ssl.session.peerCertificates.first())
+            val pairingCode = DeviceIdentity.pairingCode(identity.fingerprint, remoteFingerprint)
+
+            ssl.soTimeout = REQUEST_TIMEOUT_MS
+            val input = ssl.inputStream
+            val output = ssl.outputStream
 
             val line = try {
                 readLine(input)
@@ -141,7 +172,7 @@ class ConnectionEngine(
             val request = line?.let { ConnectMessage.parse(it) }
 
             if (request == null || request.type != "request") {
-                socket.closeQuietly()
+                ssl.closeQuietly()
                 return
             }
 
@@ -152,21 +183,24 @@ class ConnectionEngine(
                 if (handler == null) {
                     cont.resumeWith(Result.success(false))
                 } else {
-                    handler(ConnectionRequest(requesterName, remoteAddress, request.deviceId) { result ->
+                    handler(ConnectionRequest(requesterName, remoteAddress, request.deviceId, remoteFingerprint, pairingCode) { result ->
                         if (cont.isActive) cont.resumeWith(Result.success(result))
                     })
                 }
             }
 
-            socket.soTimeout = 0
-            writeLine(output, ConnectMessage(type = if (accepted) "accept" else "reject", deviceId = localDeviceId).toJson())
+            ssl.soTimeout = 0
+            writeLine(
+                output,
+                ConnectMessage(type = if (accepted) "accept" else "reject", deviceId = localDeviceId, protocolVersion = PROTOCOL_VERSION).toJson(),
+            )
 
             if (!accepted) {
-                socket.closeQuietly()
+                ssl.closeQuietly()
                 return
             }
 
-            addPeer(socket, requesterName, remoteAddress, request.deviceId)
+            addPeer(ssl, requesterName, remoteAddress, request.deviceId, remoteFingerprint, pairingCode)
         } catch (e: Exception) {
             onStatusChanged?.invoke("處理連入連線時發生錯誤:${e.message}")
             socket.closeQuietly()
@@ -177,12 +211,14 @@ class ConnectionEngine(
      * 主動連線並送出連線請求,等待對方確認,回傳詳細結果供 UI 顯示對應的說明。
      * 呼叫端的 coroutine 被取消時(使用者在「等待對方接受」對話框按了取消),會關閉這條尚未建立完成的
      * socket 讓阻塞中的連線/讀取立刻中斷,並照一般 coroutine 取消流程丟出 CancellationException。
+     * 加密連線建立後(送出請求前)會先呼叫 [onPairingCode],讓「等待對方接受」對話框顯示配對碼。
      */
     suspend fun requestConnection(
         address: String,
         port: Int,
         myDeviceName: String,
         remoteDisplayName: String,
+        onPairingCode: ((String) -> Unit)? = null,
     ): ConnectionRequestOutcome = withContext(Dispatchers.IO) {
         val socket = Socket()
         // 阻塞式的 connect/read 不會理會 coroutine 取消,取消時直接關掉 socket 讓它們丟例外結束。
@@ -198,13 +234,34 @@ class ConnectionEngine(
                 socket.closeQuietly()
                 return@withContext ConnectionRequestOutcome.UNREACHABLE
             }
-            val input = socket.getInputStream()
-            val output = socket.getOutputStream()
+            runCatching { socket.tcpNoDelay = true }
+            val identity = identity ?: error("裝置身分還沒準備好")
+            val ssl = try {
+                (identity.socketFactory.createSocket(socket, address, port, true) as SSLSocket).apply {
+                    useClientMode = true
+                    soTimeout = TLS_HANDSHAKE_TIMEOUT_MS
+                    startHandshake()
+                }
+            } catch (e: Exception) {
+                ensureActive()
+                onStatusChanged?.invoke("無法和 $remoteDisplayName 建立加密連線,對方可能使用的是舊版 ConnectIt:${e.message}")
+                socket.closeQuietly()
+                return@withContext ConnectionRequestOutcome.INCOMPATIBLE_VERSION
+            }
+            val remoteFingerprint = DeviceIdentity.fingerprintOf(ssl.session.peerCertificates.first())
+            val pairingCode = DeviceIdentity.pairingCode(identity.fingerprint, remoteFingerprint)
+            onPairingCode?.invoke(pairingCode)
+
+            val input = ssl.inputStream
+            val output = ssl.outputStream
 
             onStatusChanged?.invoke("已送出連線請求給 $remoteDisplayName,等待對方確認...")
-            writeLine(output, ConnectMessage(type = "request", deviceName = myDeviceName, deviceId = localDeviceId).toJson())
+            writeLine(
+                output,
+                ConnectMessage(type = "request", deviceName = myDeviceName, deviceId = localDeviceId, protocolVersion = PROTOCOL_VERSION).toJson(),
+            )
 
-            socket.soTimeout = RESPONSE_TIMEOUT_MS
+            ssl.soTimeout = RESPONSE_TIMEOUT_MS
             var timedOut = false
             val line = try {
                 readLine(input)
@@ -216,10 +273,10 @@ class ConnectionEngine(
             val response = line?.let { ConnectMessage.parse(it) }
 
             if (response?.type == "accept") {
-                socket.soTimeout = 0
+                ssl.soTimeout = 0
                 // 連線成功後這條 socket 要繼續用,不能再被上面的取消處理關掉。
                 cancelHandle?.dispose()
-                addPeer(socket, remoteDisplayName, address, response.deviceId)
+                addPeer(ssl, remoteDisplayName, address, response.deviceId, remoteFingerprint, pairingCode)
                 ConnectionRequestOutcome.ACCEPTED
             } else {
                 onStatusChanged?.invoke(
@@ -245,8 +302,8 @@ class ConnectionEngine(
      * 登記一條剛完成交握的連線並開始監控。同一台裝置(相同 DeviceId)如果還留著一條舊連線——通常是對方
      * 斷線後重新連線,舊連線還沒被心跳判定斷線——先把舊的關掉,避免同一台裝置出現兩次。
      */
-    private fun addPeer(socket: Socket, name: String, address: String, remoteDeviceId: String?) {
-        val peer = PeerConnection(context, scope, socket, name, address, remoteDeviceId, customDownloadFolderProvider)
+    private fun addPeer(socket: Socket, name: String, address: String, remoteDeviceId: String?, remoteFingerprint: String, pairingCode: String) {
+        val peer = PeerConnection(context, scope, socket, name, address, remoteDeviceId, remoteFingerprint, pairingCode, customDownloadFolderProvider)
         val stale = if (remoteDeviceId == null) emptyList() else _peers.filter { it.remoteDeviceId == remoteDeviceId }
         _peers.add(peer)
         stale.forEach { it.disconnect() }
@@ -294,5 +351,13 @@ class ConnectionEngine(
     fun dispose() {
         disconnectAll()
         stopListening()
+    }
+
+    companion object {
+        /** 目前的協定版本:2 = 整條連線走 TLS。mDNS TXT 記錄的 "v" 也是這個值。 */
+        const val PROTOCOL_VERSION = 2
+
+        /** 舊版發起端被拒絕時,reject 訊息的 Reason。 */
+        const val UPGRADE_REQUIRED_REASON = "upgrade-required"
     }
 }

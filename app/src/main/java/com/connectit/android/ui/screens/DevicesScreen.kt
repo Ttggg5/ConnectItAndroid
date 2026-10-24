@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -293,6 +294,13 @@ private fun DeviceCard(
                     icon = Icons.Filled.CheckCircle,
                     containerColor = BrandColors.Success.copy(alpha = 0.15f),
                     contentColor = BrandColors.Success,
+                )
+                // 對方是不支援加密連線的舊版:連不上,點下去會說明要請對方更新。
+                device.needsUpdate -> StatusPill(
+                    text = "需要更新",
+                    icon = Icons.Filled.SystemUpdate,
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 else -> GradientButton(
                     onClick = onConnect,

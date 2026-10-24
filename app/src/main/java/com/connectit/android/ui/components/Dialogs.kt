@@ -9,7 +9,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.LinkOff
@@ -27,12 +29,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.connectit.android.model.ConnectionRequest
 import com.connectit.android.model.ConnectionRequestOutcome
+import com.connectit.android.connection.DeviceIdentity
 import com.connectit.android.service.ConnectFailure
 
 /** 品牌風格的對話框外框:大圓角、置中內容。 */
@@ -79,6 +84,15 @@ fun ConnectionRequestDialog(request: ConnectionRequest, onRespond: (accept: Bool
         )
         Spacer(Modifier.height(4.dp))
         Text(request.requesterAddress, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(14.dp))
+        PairingCodeBox(DeviceIdentity.formatPairingCode(request.pairingCode))
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "對方畫面上的配對碼跟這裡一樣才接受;不一樣代表可能有人假冒,請拒絕。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
         Spacer(Modifier.height(12.dp))
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -95,20 +109,25 @@ fun ConnectionRequestDialog(request: ConnectionRequest, onRespond: (accept: Bool
     }
 }
 
-/** 送出連線請求後、對方還沒按接受/拒絕之前顯示,可以取消。 */
+/**
+ * 送出連線請求後、對方還沒按接受/拒絕之前顯示,可以取消。[pairingCode] 在加密連線建立後才有,
+ * 讓使用者跟對方畫面上的配對碼核對。
+ */
 @Composable
-fun WaitingForAcceptDialog(deviceName: String, onCancel: () -> Unit) {
+fun WaitingForAcceptDialog(deviceName: String, pairingCode: String?, onCancel: () -> Unit) {
     BrandDialog(onDismissRequest = onCancel, dismissOnOutside = false) {
         RadarPulse(icon = Icons.Filled.SettingsInputAntenna, size = 130.dp)
         Spacer(Modifier.height(12.dp))
         Text("正在等待「$deviceName」接受", style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
         Spacer(Modifier.height(6.dp))
         Text(
-            "請在對方的裝置上按下「接受」。",
+            "請確認對方畫面上的配對碼跟這裡一樣,再在對方的裝置上按下「接受」。",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
+        Spacer(Modifier.height(14.dp))
+        PairingCodeBox(pairingCode?.let { DeviceIdentity.formatPairingCode(it) } ?: "建立加密連線中…")
         Spacer(Modifier.height(20.dp))
         GhostButton(onClick = onCancel, text = "取消", modifier = Modifier.fillMaxWidth())
     }
@@ -134,12 +153,33 @@ fun ConnectFailureDialog(failure: ConnectFailure, onDismiss: () -> Unit) {
     }
 }
 
+/** 對話框裡的「配對碼」區塊:兩邊顯示同一組數字,使用者核對一致才接受。 */
+@Composable
+fun PairingCodeBox(code: String) {
+    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+        Column(Modifier.padding(horizontal = 18.dp, vertical = 10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("配對碼", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                code,
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+    }
+}
+
 private data class FailureText(val icon: ImageVector, val title: String, val message: String)
 
 private fun describeFailure(failure: ConnectFailure): FailureText = when (failure.outcome) {
     ConnectionRequestOutcome.REJECTED -> FailureText(
         Icons.Filled.PersonOff, "「${failure.deviceName}」拒絕了連線",
         "對方按下了「拒絕」。如果是誤按,可以再試一次。",
+    )
+    ConnectionRequestOutcome.INCOMPATIBLE_VERSION -> FailureText(
+        Icons.Filled.SystemUpdate, "「${failure.deviceName}」需要更新",
+        "現在的連線一律加密,對方使用的是不支援加密的舊版 ConnectIt。請把兩台裝置都更新到最新版(設定 → 軟體更新)後再連線。",
     )
     ConnectionRequestOutcome.TIMEOUT -> FailureText(
         Icons.Filled.HourglassEmpty, "「${failure.deviceName}」沒有回應",

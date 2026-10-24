@@ -76,6 +76,7 @@ fun TvAppRoot(service: ConnectItService) {
 
     val pendingConnectionRequest by service.pendingConnectionRequest.collectAsState()
     val connectingTo by service.connectingTo.collectAsState()
+    val connectingPairingCode by service.connectingPairingCode.collectAsState()
     val connectFailure by service.connectFailure.collectAsState()
     val screenMirrorState by service.screenMirror.state.collectAsState()
     val connectionState by service.connectionState.collectAsState()
@@ -201,7 +202,7 @@ fun TvAppRoot(service: ConnectItService) {
             )
         }
         connectingTo?.let { device ->
-            WaitingForAcceptDialog(deviceName = device.displayName, onCancel = { service.cancelConnect() })
+            WaitingForAcceptDialog(deviceName = device.displayName, pairingCode = connectingPairingCode, onCancel = { service.cancelConnect() })
         }
         connectFailure?.let { failure ->
             ConnectFailureDialog(failure = failure, onDismiss = { service.dismissConnectFailure() })

@@ -124,6 +124,7 @@ fun ConnectItApp(service: ConnectItService, viewModel: MainViewModel) {
     val connectionState by service.connectionState.collectAsState()
     val pendingConnectionRequest by service.pendingConnectionRequest.collectAsState()
     val connectingTo by service.connectingTo.collectAsState()
+    val connectingPairingCode by service.connectingPairingCode.collectAsState()
     val connectFailure by service.connectFailure.collectAsState()
     val screenMirrorState by service.screenMirror.state.collectAsState()
     val pendingShare by viewModel.pendingShare.collectAsState()
@@ -310,7 +311,7 @@ fun ConnectItApp(service: ConnectItService, viewModel: MainViewModel) {
     }
 
     connectingTo?.let { device ->
-        WaitingForAcceptDialog(deviceName = device.displayName, onCancel = { service.cancelConnect() })
+        WaitingForAcceptDialog(deviceName = device.displayName, pairingCode = connectingPairingCode, onCancel = { service.cancelConnect() })
     }
 
     connectFailure?.let { failure ->

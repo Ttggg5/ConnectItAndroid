@@ -15,12 +15,22 @@ import org.json.JSONObject
  * "request" | "accept" | "reject"。[deviceId] 是送出方的穩定裝置識別碼(request 與 accept 都會帶),
  * 同一台裝置重新連線時用來取代舊連線。
  */
-data class ConnectMessage(val type: String, val deviceName: String? = null, val deviceId: String? = null) {
+data class ConnectMessage(
+    val type: String,
+    val deviceName: String? = null,
+    val deviceId: String? = null,
+    /** 協定版本(見 ConnectionEngine.PROTOCOL_VERSION);舊版沒有這個欄位。 */
+    val protocolVersion: Int? = null,
+    /** reject 的原因:舊版發起端被拒絕時是 ConnectionEngine.UPGRADE_REQUIRED_REASON。 */
+    val reason: String? = null,
+) {
     fun toJson(): String {
         val obj = JSONObject()
         obj.put("Type", type)
         if (deviceName != null) obj.put("DeviceName", deviceName)
         if (deviceId != null) obj.put("DeviceId", deviceId)
+        if (protocolVersion != null) obj.put("ProtocolVersion", protocolVersion)
+        if (reason != null) obj.put("Reason", reason)
         return obj.toString()
     }
 
@@ -31,6 +41,8 @@ data class ConnectMessage(val type: String, val deviceName: String? = null, val 
                 type = obj.getString("Type"),
                 deviceName = obj.optStringOrNull("DeviceName"),
                 deviceId = obj.optStringOrNull("DeviceId"),
+                protocolVersion = if (obj.has("ProtocolVersion") && !obj.isNull("ProtocolVersion")) obj.getInt("ProtocolVersion") else null,
+                reason = obj.optStringOrNull("Reason"),
             )
         }.getOrNull()
     }

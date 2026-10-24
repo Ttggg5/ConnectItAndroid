@@ -13,20 +13,26 @@ import com.connectit.android.video.VideoLibraryScanner
 import com.connectit.android.video.VideoServerPlaybackOptions
 import com.connectit.android.video.VideoSort
 import kotlinx.coroutines.flow.Flow
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlinx.coroutines.flow.first
 import java.util.UUID
 import kotlinx.coroutines.flow.map
 
 enum class AppThemeMode { LIGHT, DARK, AUTO }
 
+/** 信任清單裡的一台裝置。[name] 只是顯示用,比對一律用 [fingerprint](對方 TLS 憑證的指紋)。 */
+data class TrustedDevice(val fingerprint: String, val name: String, val deviceId: String?)
+
 data class AppSettings(
     val deviceName: String,
     val themeMode: AppThemeMode,
     /** 收到傳輸/斷線等事件時是否跳出系統通知(連線請求對話框不受影響,只影響提醒用的通知)。 */
     val notificationsEnabled: Boolean = true,
-    /** 已標記為信任的裝置名稱(比對 [com.connectit.android.model.ConnectionRequest.requesterName]),
-     * 收到這些裝置的連線請求時不再跳出確認對話框,直接自動接受。 */
-    val trustedDeviceNames: Set<String> = emptySet(),
+    /** 已標記為信任的裝置(比對 [com.connectit.android.model.ConnectionRequest.requesterFingerprint]),
+     * 收到這些裝置的連線請求時不再跳出確認對話框,直接自動接受。只認憑證指紋,改名或冒名都不會被自動接受;
+     * 舊版只存名稱(trusted_device_names),沒辦法換算成指紋,升級後需要重新配對一次。 */
+    val trustedDevices: List<TrustedDevice> = emptyList(),
     /** 使用者透過 SAF 選取的自訂接收資料夾(content:// tree Uri 字串),null 代表使用預設的
      * 公用 Download/ConnectIt 資料夾。 */
     val customDownloadFolderUri: String? = null,
@@ -71,7 +77,7 @@ class SettingsRepository(private val context: Context) {
         val DEVICE_NAME = stringPreferencesKey("device_name")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val NOTIFICATIONS_ENABLED = booleanPreferencesKey("notifications_enabled")
-        val TRUSTED_DEVICE_NAMES = stringSetPreferencesKey("trusted_device_names")
+        val TRUSTED_DEVICES_V2 = stringPreferencesKey("trusted_devices_v2")
         val CUSTOM_DOWNLOAD_FOLDER_URI = stringPreferencesKey("custom_download_folder_uri")
         val CONNECT_TIMEOUT_SECONDS = intPreferencesKey("connect_timeout_seconds")
         val PREFERRED_PORT = intPreferencesKey("preferred_port")
@@ -91,7 +97,7 @@ class SettingsRepository(private val context: Context) {
             deviceName = prefs[Keys.DEVICE_NAME] ?: defaultDeviceName(),
             themeMode = prefs[Keys.THEME_MODE]?.let { runCatching { AppThemeMode.valueOf(it) }.getOrNull() } ?: AppThemeMode.AUTO,
             notificationsEnabled = prefs[Keys.NOTIFICATIONS_ENABLED] ?: true,
-            trustedDeviceNames = prefs[Keys.TRUSTED_DEVICE_NAMES] ?: emptySet(),
+            trustedDevices = parseTrustedDevices(prefs[Keys.TRUSTED_DEVICES_V2]),
             customDownloadFolderUri = prefs[Keys.CUSTOM_DOWNLOAD_FOLDER_URI],
             connectTimeoutSeconds = (prefs[Keys.CONNECT_TIMEOUT_SECONDS] ?: AppSettings.DEFAULT_CONNECT_TIMEOUT_SECONDS)
                 .coerceIn(AppSettings.MIN_CONNECT_TIMEOUT_SECONDS, AppSettings.MAX_CONNECT_TIMEOUT_SECONDS),
@@ -122,13 +128,22 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit { it[Keys.NOTIFICATIONS_ENABLED] = enabled }
     }
 
-    suspend fun trustDevice(name: String) {
-        if (name.isBlank()) return
-        context.dataStore.edit { it[Keys.TRUSTED_DEVICE_NAMES] = (it[Keys.TRUSTED_DEVICE_NAMES] ?: emptySet()) + name }
+    /** 加入(或更新)一台信任裝置;同一台裝置(相同指紋或相同 DeviceId)只留最新的一筆。 */
+    suspend fun trustDevice(fingerprint: String, name: String, deviceId: String?) {
+        if (fingerprint.isBlank()) return
+        context.dataStore.edit { prefs ->
+            val kept = parseTrustedDevices(prefs[Keys.TRUSTED_DEVICES_V2]).filterNot {
+                it.fingerprint.equals(fingerprint, ignoreCase = true) || (deviceId != null && it.deviceId == deviceId)
+            }
+            prefs[Keys.TRUSTED_DEVICES_V2] = encodeTrustedDevices(kept + TrustedDevice(fingerprint, name, deviceId))
+        }
     }
 
-    suspend fun untrustDevice(name: String) {
-        context.dataStore.edit { it[Keys.TRUSTED_DEVICE_NAMES] = (it[Keys.TRUSTED_DEVICE_NAMES] ?: emptySet()) - name }
+    suspend fun untrustDevice(fingerprint: String) {
+        context.dataStore.edit { prefs ->
+            val kept = parseTrustedDevices(prefs[Keys.TRUSTED_DEVICES_V2]).filterNot { it.fingerprint.equals(fingerprint, ignoreCase = true) }
+            prefs[Keys.TRUSTED_DEVICES_V2] = encodeTrustedDevices(kept)
+        }
     }
 
     /** [uriString] 傳 null 代表清除自訂資料夾、還原成預設的 Download/ConnectIt。 */
@@ -195,6 +210,39 @@ class SettingsRepository(private val context: Context) {
     }
 
     fun defaultDeviceName(): String = Build.MODEL ?: "Android"
+
+    companion object {
+        /** 信任清單存成 JSON 陣列字串:[{"Fingerprint":..,"Name":..,"DeviceId":..}],欄位名稱跟 Windows 端一致。 */
+        internal fun parseTrustedDevices(json: String?): List<TrustedDevice> {
+            if (json.isNullOrBlank()) return emptyList()
+            return runCatching {
+                val array = JSONArray(json)
+                (0 until array.length()).mapNotNull { i ->
+                    val obj = array.getJSONObject(i)
+                    val fingerprint = obj.optString("Fingerprint").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    TrustedDevice(
+                        fingerprint = fingerprint,
+                        name = obj.optString("Name"),
+                        deviceId = if (obj.isNull("DeviceId")) null else obj.optString("DeviceId").takeIf { it.isNotBlank() },
+                    )
+                }
+            }.getOrDefault(emptyList())
+        }
+
+        internal fun encodeTrustedDevices(devices: List<TrustedDevice>): String {
+            val array = JSONArray()
+            devices.forEach { device ->
+                array.put(
+                    JSONObject().apply {
+                        put("Fingerprint", device.fingerprint)
+                        put("Name", device.name)
+                        put("DeviceId", device.deviceId ?: JSONObject.NULL)
+                    }
+                )
+            }
+            return array.toString()
+        }
+    }
 
     /**
      * 這台裝置的穩定識別碼(第一次呼叫時產生後就固定不變),交握時送給對方、也放在 mDNS TXT 記錄裡。
