@@ -11,12 +11,16 @@ import org.json.JSONObject
  * 這裡的 JSON key 必須跟 Windows 那邊逐字一致,不能改成 camelCase。
  */
 
-/** "request" | "accept" | "reject" */
-data class ConnectMessage(val type: String, val deviceName: String? = null) {
+/**
+ * "request" | "accept" | "reject"。[deviceId] 是送出方的穩定裝置識別碼(request 與 accept 都會帶),
+ * 同一台裝置重新連線時用來取代舊連線。
+ */
+data class ConnectMessage(val type: String, val deviceName: String? = null, val deviceId: String? = null) {
     fun toJson(): String {
         val obj = JSONObject()
         obj.put("Type", type)
         if (deviceName != null) obj.put("DeviceName", deviceName)
+        if (deviceId != null) obj.put("DeviceId", deviceId)
         return obj.toString()
     }
 
@@ -26,6 +30,7 @@ data class ConnectMessage(val type: String, val deviceName: String? = null) {
             ConnectMessage(
                 type = obj.getString("Type"),
                 deviceName = obj.optStringOrNull("DeviceName"),
+                deviceId = obj.optStringOrNull("DeviceId"),
             )
         }.getOrNull()
     }

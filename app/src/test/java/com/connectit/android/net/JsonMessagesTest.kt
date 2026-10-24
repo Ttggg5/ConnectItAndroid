@@ -3,6 +3,7 @@ package com.connectit.android.net
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.json.JSONObject
 import org.junit.Test
 
 /**
@@ -35,6 +36,15 @@ class JsonMessagesTest {
         val parsed = ConnectMessage.parse(original.toJson())
 
         assertEquals(original, parsed)
+    }
+
+    @Test
+    fun `ConnectMessage carries DeviceId with PascalCase key`() {
+        val json = ConnectMessage(type = "accept", deviceId = "abc123").toJson()
+
+        assertEquals("abc123", JSONObject(json).getString("DeviceId"))
+        assertEquals(ConnectMessage(type = "accept", deviceId = "abc123"), ConnectMessage.parse(json))
+        assertNull(ConnectMessage.parse("""{"Type":"request","DeviceName":"Old"}""")!!.deviceId)
     }
 
     @Test

@@ -67,8 +67,9 @@ import com.connectit.android.ui.theme.BrandColors
 fun ScreenMirrorHost(service: ConnectItService) {
     val controller = service.screenMirror
     val state by controller.state.collectAsState()
-    val connectionState by service.connectionState.collectAsState()
-    val peerName = (connectionState as? ConnectionUiState.Connected)?.peer?.name ?: "對方"
+    // 可以同時連線多台,但螢幕鏡像只跟其中一台進行:對話框顯示的是鏡像對象的名稱。
+    // controller.peer 在狀態改變之前就已經設好,狀態變化觸發重組時讀到的一定是對的那台。
+    val peerName = controller.peer?.name ?: "對方"
     val context = LocalContext.current
 
     val projectionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -169,7 +170,7 @@ fun ScreenMirrorSection(service: ConnectItService, modifier: Modifier = Modifier
                 val idle = current == ScreenMirrorState.Idle
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                     GhostButton(
-                        onClick = { controller.requestViewPeer() },
+                        onClick = { service.requestViewPeerScreen() },
                         text = "觀看對方螢幕",
                         icon = Icons.Filled.CastConnected,
                         enabled = idle,
@@ -193,7 +194,7 @@ fun ScreenMirrorSection(service: ConnectItService, modifier: Modifier = Modifier
         ShareScreenDialog(
             onConfirm = { allowControl, shareAudio ->
                 showShareDialog = false
-                controller.startShareOffer(allowControl, shareAudio)
+                service.startScreenShareOffer(allowControl, shareAudio)
             },
             onDismiss = { showShareDialog = false },
         )

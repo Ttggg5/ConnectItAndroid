@@ -26,6 +26,8 @@ data class TransferRecord(
     val name: String,
     val isFolder: Boolean,
     val savedUri: String? = null,
+    /** 傳給誰/從誰收到(可以同時連線多台,紀錄裡要分得出是哪一台)。 */
+    val peerName: String = "",
     val timeMillis: Long = System.currentTimeMillis(),
 ) {
     val isReceived: Boolean get() = direction == TransferDirection.RECEIVING
@@ -49,6 +51,8 @@ data class TransferRecord(
 data class ConnectionRequest(
     val requesterName: String,
     val requesterAddress: String,
+    /** 對方的穩定裝置識別碼(舊版沒有時為 null)。 */
+    val requesterDeviceId: String?,
     val respond: (Boolean) -> Unit,
 )
 
@@ -104,6 +108,8 @@ data class FolderTransferEnded(
 
 /** 已連線的對象。 */
 data class ConnectedPeer(
+    /** 這條連線在本機的識別碼(見 [com.connectit.android.connection.PeerConnection.peerId])。 */
+    val peerId: String,
     val name: String,
     val address: String,
 )

@@ -115,7 +115,7 @@ fun TvAppRoot(service: ConnectItService) {
             ScreenViewerScreen(
                 service = service,
                 state = viewing,
-                peerName = (connectionState as? ConnectionUiState.Connected)?.peer?.name ?: "對方",
+                peerName = service.screenMirror.peer?.name ?: "對方",
                 allowInput = false,
             )
         }

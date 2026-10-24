@@ -177,7 +177,7 @@ fun ConnectItApp(service: ConnectItService, viewModel: MainViewModel) {
         ScreenViewerScreen(
             service = service,
             state = viewing,
-            peerName = (connectionState as? ConnectionUiState.Connected)?.peer?.name ?: "對方",
+            peerName = service.screenMirror.peer?.name ?: "對方",
         )
         return
     }

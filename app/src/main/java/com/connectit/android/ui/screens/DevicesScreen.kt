@@ -84,6 +84,8 @@ private val TwoPaneBreakpoint = 760.dp
 fun DevicesScreen(service: ConnectItService, modifier: Modifier = Modifier) {
     val devices by service.devices.collectAsState()
     val connectionState by service.connectionState.collectAsState()
+    val connectedPeers by service.connectedPeers.collectAsState()
+    val connectedAddresses = connectedPeers.map { it.address }.toSet()
     val settings by service.settingsRepository.settings.collectAsState(
         initial = AppSettings(service.settingsRepository.defaultDeviceName(), AppThemeMode.AUTO)
     )
@@ -99,7 +101,7 @@ fun DevicesScreen(service: ConnectItService, modifier: Modifier = Modifier) {
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    deviceListContent(service, settings, devices, connectedPeer?.address)
+                    deviceListContent(service, settings, devices, connectedAddresses)
                 }
                 LazyColumn(
                     modifier = Modifier.width(380.dp).fillMaxSize(),
@@ -118,9 +120,9 @@ fun DevicesScreen(service: ConnectItService, modifier: Modifier = Modifier) {
                     if (connectedPeer != null) {
                         item(key = "hero") { DeviceHero(service, settings.deviceName) }
                         item(key = "connection") { ConnectionPanel(service = service, peer = connectedPeer) }
-                        deviceListContent(service, settings, devices, connectedPeer.address, includeHero = false)
+                        deviceListContent(service, settings, devices, connectedAddresses, includeHero = false)
                     } else {
-                        deviceListContent(service, settings, devices, null)
+                        deviceListContent(service, settings, devices, connectedAddresses)
                     }
                 }
             }
@@ -132,7 +134,8 @@ private fun LazyListScope.deviceListContent(
     service: ConnectItService,
     settings: AppSettings,
     devices: List<DiscoveredDevice>,
-    connectedAddress: String?,
+    /** 所有已連線裝置的位址(可以同時連線多台)。 */
+    connectedAddresses: Set<String>,
     includeHero: Boolean = true,
 ) {
     if (includeHero) {
@@ -167,8 +170,8 @@ private fun LazyListScope.deviceListContent(
         items(devices, key = { it.key }) { device ->
             DeviceCard(
                 device = device,
-                isConnected = connectedAddress != null && device.host == connectedAddress,
-                connectEnabled = connectedAddress == null,
+                isConnected = device.host in connectedAddresses,
+                connectEnabled = device.host !in connectedAddresses,
                 onConnect = { service.connectTo(device, settings.deviceName) },
             )
         }

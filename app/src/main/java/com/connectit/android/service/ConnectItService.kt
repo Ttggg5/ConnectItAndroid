@@ -26,6 +26,7 @@ import androidx.lifecycle.lifecycleScope
 import com.connectit.android.MainActivity
 import com.connectit.android.R
 import com.connectit.android.connection.ConnectionEngine
+import com.connectit.android.connection.PeerConnection
 import com.connectit.android.discovery.NsdDiscoveryManager
 import com.connectit.android.model.ConnectedPeer
 import com.connectit.android.model.ConnectionRequest
@@ -69,6 +70,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.ceil
 import kotlin.random.Random
 
@@ -183,8 +185,29 @@ class ConnectItService : LifecycleService() {
     // 有沒有走到片尾(見 checkRemoteAutoplay)。放在服務裡而不是遙控畫面,離開遙控畫面也照樣會接下一部。
     private var remoteAutoplayWatcher: Job? = null
 
+    // 可以同時連線多台裝置:[connectedPeers] 是所有已連線的裝置,畫面一次顯示其中一台([selectedPeerId]),
+    // 傳送檔案、螢幕鏡像、中斷連線都作用在選取的那台(勾選「同時傳給所有已連線的裝置」時傳給全部)。
+    // [connectionState]/[transferState]/[completedTransfer] 是「選取中那台」的狀態,畫面沿用原本單一連線的寫法。
+    private val peerConnections = ConcurrentHashMap<String, PeerConnection>()
+
+    private val _connectedPeers = MutableStateFlow<List<ConnectedPeer>>(emptyList())
+    val connectedPeers: StateFlow<List<ConnectedPeer>> = _connectedPeers.asStateFlow()
+
+    private val _selectedPeerId = MutableStateFlow<String?>(null)
+    val selectedPeerId: StateFlow<String?> = _selectedPeerId.asStateFlow()
+
     private val _connectionState = MutableStateFlow<ConnectionUiState>(ConnectionUiState.Idle)
     val connectionState: StateFlow<ConnectionUiState> = _connectionState.asStateFlow()
+
+    /** 每台已連線裝置目前的傳輸狀態(以 peerId 為 key),裝置切換列用來顯示「傳送中 42%」。 */
+    private val _peerTransfers = MutableStateFlow<Map<String, TransferUiState>>(emptyMap())
+    val peerTransfers: StateFlow<Map<String, TransferUiState>> = _peerTransfers.asStateFlow()
+    private val completedTransfers = MutableStateFlow<Map<String, TransferRecord>>(emptyMap())
+    private val transferRates = ConcurrentHashMap<String, TransferRateTracker>()
+
+    private val _sendToAll = MutableStateFlow(false)
+    /** 「同時傳給所有已連線的裝置」:只有連線兩台以上時才有意義。 */
+    val sendToAll: StateFlow<Boolean> = _sendToAll.asStateFlow()
 
     private val _pendingConnectionRequest = MutableStateFlow<ConnectionRequest?>(null)
     val pendingConnectionRequest: StateFlow<ConnectionRequest?> = _pendingConnectionRequest.asStateFlow()
@@ -200,14 +223,13 @@ class ConnectItService : LifecycleService() {
     private val _connectFailure = MutableStateFlow<ConnectFailure?>(null)
     val connectFailure: StateFlow<ConnectFailure?> = _connectFailure.asStateFlow()
 
-    /** 這次連線期間的傳輸紀錄(新的在前),斷線或重新連線時清空。 */
+    /** 傳輸紀錄(新的在前,每筆記著是哪台裝置),只存在記憶體裡。 */
     private val _transferHistory = MutableStateFlow<List<TransferRecord>>(emptyList())
     val transferHistory: StateFlow<List<TransferRecord>> = _transferHistory.asStateFlow()
 
-    /** 剛接收完成、可以直接開啟的項目:傳輸卡片會切成「完成」狀態顯示「開啟」按鈕,直到使用者關閉或開始下一個傳輸。 */
-    private val transferRate = TransferRateTracker()
     private var lastProgressNotificationAt = 0L
 
+    /** 選取中那台剛接收完成、可以直接開啟的項目:傳輸卡片會切成「完成」狀態顯示「開啟」按鈕,直到使用者關閉或開始下一個傳輸。 */
     private val _completedTransfer = MutableStateFlow<TransferRecord?>(null)
     val completedTransfer: StateFlow<TransferRecord?> = _completedTransfer.asStateFlow()
 
@@ -259,7 +281,6 @@ class ConnectItService : LifecycleService() {
         screenMirror = ScreenMirrorController(
             context = applicationContext,
             scope = lifecycleScope,
-            engine = connectionEngine,
             onNotice = { pushEvent(it) },
             onProjectionReleased = { setForegroundTypes(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) },
         )
@@ -280,6 +301,7 @@ class ConnectItService : LifecycleService() {
         }
 
         lifecycleScope.launch {
+            connectionEngine.localDeviceId = settingsRepository.getOrCreateDeviceId()
             val preferredPort = settingsRepository.settings.first().preferredPort
             val port = connectionEngine.startListening(preferredPort)
             settingsRepository.settings.map { it.deviceName }.distinctUntilChanged().collect { name ->
@@ -303,7 +325,7 @@ class ConnectItService : LifecycleService() {
     }
 
     override fun onDestroy() {
-        screenMirror.onConnectionClosed()
+        screenMirror.peer?.let { screenMirror.onConnectionClosed(it) }
         deviceDiscovery.teardown()
         videoDiscovery.teardown()
         videoHostServer.stop()
@@ -358,7 +380,74 @@ class ConnectItService : LifecycleService() {
     }
 
     fun dismissCompletedTransfer() {
-        _completedTransfer.value = null
+        _selectedPeerId.value?.let { setCompletedTransfer(it, null) }
+    }
+
+    /** 畫面頂端的裝置切換列選了另一台。 */
+    fun selectPeer(peerId: String) {
+        if (peerConnections.containsKey(peerId)) {
+            _selectedPeerId.value = peerId
+            refreshSelection()
+        }
+    }
+
+    fun setSendToAll(enabled: Boolean) {
+        _sendToAll.value = enabled
+    }
+
+    /** 選取中的那台裝置。 */
+    val selectedPeer: PeerConnection? get() = _selectedPeerId.value?.let { peerConnections[it] }
+
+    /** 這次要傳給哪些裝置:勾選「同時傳給所有已連線的裝置」時是全部,否則是選取中的那台。 */
+    private fun sendTargets(): List<PeerConnection> {
+        val all = _connectedPeers.value.mapNotNull { peerConnections[it.peerId] }
+        if (_sendToAll.value && all.size > 1) return all
+        return listOfNotNull(selectedPeer)
+    }
+
+    /** 過濾掉正在傳輸中的裝置(每條連線同一時間只能有一個傳輸),並告訴使用者哪些被略過了。 */
+    private fun readyTargets(): List<PeerConnection> {
+        val targets = sendTargets()
+        val busy = targets.filter { it.isFileTransferActive }
+        if (busy.isNotEmpty()) {
+            pushEvent(
+                if (targets.size == 1) "目前已有檔案傳輸正在進行,請稍後再試。"
+                else "${busy.joinToString("、") { it.name }} 正在傳輸中,這次先略過。"
+            )
+        }
+        return targets - busy.toSet()
+    }
+
+    private fun rateFor(peer: PeerConnection): TransferRateTracker = transferRates.getOrPut(peer.peerId) { TransferRateTracker() }
+
+    private fun beginTransfer(peer: PeerConnection, title: String, status: String) {
+        setCompletedTransfer(peer.peerId, null)
+        rateFor(peer).reset()
+        setTransfer(peer.peerId, TransferUiState(title, status, 0f))
+    }
+
+    private fun setTransfer(peerId: String, state: TransferUiState?) {
+        _peerTransfers.update { if (state == null) it - peerId else it + (peerId to state) }
+        refreshSelection()
+    }
+
+    private fun setCompletedTransfer(peerId: String, record: TransferRecord?) {
+        completedTransfers.update { if (record == null) it - peerId else it + (peerId to record) }
+        refreshSelection()
+    }
+
+    /** 依選取中的裝置更新 [connectionState]/[transferState]/[completedTransfer];選取的裝置斷線時改選最後連上的那台。 */
+    private fun refreshSelection() {
+        val peers = _connectedPeers.value
+        var id = _selectedPeerId.value
+        if (id == null || peers.none { it.peerId == id }) {
+            id = peers.lastOrNull()?.peerId
+            _selectedPeerId.value = id
+        }
+        val selected = peers.firstOrNull { it.peerId == id }
+        _connectionState.value = selected?.let { ConnectionUiState.Connected(it) } ?: ConnectionUiState.Idle
+        _transferState.value = id?.let { _peerTransfers.value[it] }
+        _completedTransfer.value = id?.let { completedTransfers.value[it] }
     }
 
     /** [trust] 為 true 時(必須同時 [accept])把這台裝置加入信任清單,之後的連線請求不再詢問。 */
@@ -373,54 +462,50 @@ class ConnectItService : LifecycleService() {
         }
     }
 
+    /** 中斷選取中那台裝置的連線;之後的狀態更新由 onPeerClosed 統一處理。 */
     fun disconnectFromPeer() {
-        screenMirror.onConnectionClosed()
-        connectionEngine.disconnect()
-        _connectionState.value = ConnectionUiState.Idle
-        _transferState.value = null
-        _completedTransfer.value = null
-        _transferHistory.value = emptyList()
-        pushEvent("已中斷連線。")
+        selectedPeer?.disconnect()
     }
 
-    val isFileTransferActive: Boolean get() = connectionEngine.isFileTransferActive
+    /** 選取中的那台是否正在傳輸。 */
+    val isFileTransferActive: Boolean get() = selectedPeer?.isFileTransferActive == true
 
     fun sendFile(uri: Uri, name: String, size: Long) {
-        if (connectionEngine.isFileTransferActive) {
-            pushEvent("目前已有檔案傳輸正在進行,請稍後再試。")
-            return
+        for (peer in readyTargets()) {
+            beginTransfer(peer, name, "等待對方接受...")
+            peer.sendFile(uri, name, size)
         }
-        _completedTransfer.value = null
-        transferRate.reset()
-        _transferState.value = TransferUiState(name, "等待對方接受...", 0f)
-        connectionEngine.sendFile(uri, name, size)
     }
 
     fun sendFiles(files: List<Triple<Uri, String, Long>>) {
         if (files.isEmpty()) return
-        if (connectionEngine.isFileTransferActive) {
-            pushEvent("目前已有檔案傳輸正在進行,請稍後再試。")
-            return
-        }
         val title = if (files.size == 1) files[0].second else "${files.size} 個檔案"
-        _completedTransfer.value = null
-        transferRate.reset()
-        _transferState.value = TransferUiState(title, "等待對方接受...", 0f)
-        connectionEngine.sendFiles(files)
+        for (peer in readyTargets()) {
+            beginTransfer(peer, title, "等待對方接受...")
+            peer.sendFiles(files)
+        }
     }
 
     fun sendFolder(folderName: String, entries: List<FolderEntry>) {
-        if (connectionEngine.isFileTransferActive) {
-            pushEvent("目前已有檔案傳輸正在進行,請稍後再試。")
-            return
+        for (peer in readyTargets()) {
+            beginTransfer(peer, folderName, "等待對方接受...")
+            peer.sendFolder(folderName, entries)
         }
-        _completedTransfer.value = null
-        transferRate.reset()
-        _transferState.value = TransferUiState(folderName, "等待對方接受...", 0f)
-        connectionEngine.sendFolder(folderName, entries)
     }
 
-    fun cancelTransfer() = connectionEngine.cancelFileTransfer()
+    fun cancelTransfer() {
+        selectedPeer?.cancelFileTransfer()
+    }
+
+    /** 請選取中的那台分享螢幕給我看。 */
+    fun requestViewPeerScreen() {
+        selectedPeer?.let { screenMirror.requestViewPeer(it) }
+    }
+
+    /** 邀請選取中的那台觀看我的螢幕。 */
+    fun startScreenShareOffer(allowControl: Boolean, shareAudio: Boolean) {
+        selectedPeer?.let { screenMirror.startShareOffer(it, allowControl, shareAudio) }
+    }
 
     /** 開始把 [treeUri](SAF 選取的資料夾)裡的影片分享出去,並透過 mDNS 廣播讓其他裝置找得到。 */
     fun startVideoServer(treeUri: Uri) {
@@ -633,8 +718,7 @@ class ConnectItService : LifecycleService() {
     private fun observeScreenMirror() {
         lifecycleScope.launch {
             screenMirror.state.collect { state ->
-                val peerName = (_connectionState.value as? ConnectionUiState.Connected)?.peer?.name
-                    ?: getString(R.string.notification_incoming_transfer_unknown_peer)
+                val peerName = screenMirror.peer?.name ?: getString(R.string.notification_incoming_transfer_unknown_peer)
                 when (state) {
                     is ScreenMirrorState.IncomingRequest -> notifyScreenMirrorRequest("$peerName 想要觀看你的螢幕")
                     is ScreenMirrorState.IncomingOffer -> notifyScreenMirrorRequest("$peerName 想要分享螢幕給你")
@@ -681,9 +765,9 @@ class ConnectItService : LifecycleService() {
         videoHostServer.onStatusChanged = { pushLog(it) }
 
         connectionEngine.onStatusChanged = { pushLog(it) }
-        connectionEngine.onScreenMessage = { screenMirror.handleMessage(it) }
-        connectionEngine.onScreenFrame = { screenMirror.handleFrame(it) }
-        connectionEngine.onScreenAudio = { screenMirror.handleAudio(it) }
+        connectionEngine.onScreenMessage = { peer, message -> screenMirror.handleMessage(peer, message) }
+        connectionEngine.onScreenFrame = { peer, payload -> screenMirror.handleFrame(peer, payload) }
+        connectionEngine.onScreenAudio = { peer, pcm -> screenMirror.handleAudio(peer, pcm) }
 
         connectionEngine.onConnectionRequested = { request ->
             val isTrusted = cachedSettings.trustedDeviceNames.any { it.equals(request.requesterName, ignoreCase = true) }
@@ -701,88 +785,96 @@ class ConnectItService : LifecycleService() {
         connectionEngine.onConnected = { peer ->
             _pendingConnectionRequest.value = null
             clearConnectionRequestNotification()
-            _connectionState.value = ConnectionUiState.Connected(peer)
-            _transferHistory.value = emptyList()
-            _completedTransfer.value = null
+            peerConnections[peer.peerId] = peer
+            _connectedPeers.update { it + ConnectedPeer(peer.peerId, peer.name, peer.address) }
+            _selectedPeerId.value = peer.peerId
+            refreshSelection()
             pushLog("已與 ${peer.name} (${peer.address}) 建立連線。")
             notifyConnected(peer.name)
         }
 
-        connectionEngine.onRemoteDisconnected = {
-            screenMirror.onConnectionClosed()
-            val peerName = (_connectionState.value as? ConnectionUiState.Connected)?.peer?.name
-            _connectionState.value = ConnectionUiState.Idle
-            _transferState.value = null
-            _completedTransfer.value = null
-            _transferHistory.value = emptyList()
-            pushEvent("對方已中斷連線。")
-            notifyPeerDisconnected(peerName ?: getString(R.string.notification_incoming_transfer_unknown_peer))
+        connectionEngine.onPeerClosed = { peer, byRemote ->
+            screenMirror.onConnectionClosed(peer)
+            peerConnections.remove(peer.peerId)
+            transferRates.remove(peer.peerId)
+            _connectedPeers.update { list -> list.filterNot { it.peerId == peer.peerId } }
+            _peerTransfers.update { it - peer.peerId }
+            completedTransfers.update { it - peer.peerId }
+            if (_peerTransfers.value.isEmpty()) clearIncomingTransferNotification()
+            refreshSelection()
+            if (byRemote) {
+                pushEvent("${peer.name} 已中斷連線。")
+                notifyPeerDisconnected(peer.name)
+            } else {
+                pushEvent("已中斷與 ${peer.name} 的連線。")
+            }
         }
 
         // 連線本身已經是使用者同意過的,連線建立後的檔案/資料夾傳送不再重複跳出確認對話框,
         // 直接接受並用系統通知讓使用者知道有東西正在傳進來(尤其是 App 在背景時)。
-        connectionEngine.onFileOffered = { offer ->
+        connectionEngine.onFileOffered = { peer, offer ->
             connectionEngine.respondToFileOffer(offer.transferId, true)
-            _completedTransfer.value = null
-            transferRate.reset()
-            _transferState.value = TransferUiState(offer.fileName, "接收中...", 0f)
-            notifyIncomingTransfer(offer.fileName)
+            beginTransfer(peer, offer.fileName, "接收中...")
+            notifyIncomingTransfer(peer.name, offer.fileName)
         }
-        connectionEngine.onFolderOffered = { offer ->
+        connectionEngine.onFolderOffered = { peer, offer ->
             connectionEngine.respondToFolderOffer(offer.transferId, true)
-            _completedTransfer.value = null
             val title = if (offer.isBatch) "${offer.totalEntries} 個檔案" else offer.folderName
-            transferRate.reset()
-            _transferState.value = TransferUiState(title, "接收中...(共 ${offer.totalEntries} 個檔案)", 0f)
-            notifyIncomingTransfer(title)
+            beginTransfer(peer, title, "接收中...(共 ${offer.totalEntries} 個檔案)")
+            notifyIncomingTransfer(peer.name, title)
         }
 
-        connectionEngine.onFileTransferProgress = { p ->
+        connectionEngine.onFileTransferProgress = { peer, p ->
             // 資料夾/多檔案傳輸以整批的累計位元組計算,百分比、速度、剩餘時間才是「整個傳輸」的。
             val isFolder = p.folderTransferId != null && p.totalEntries != null
             val transferred = if (isFolder) p.folderBytesTransferred ?: p.bytesTransferred else p.bytesTransferred
             val total = if (isFolder) p.folderTotalBytes ?: p.totalBytes else p.totalBytes
-            val snapshot = transferRate.update(transferred, total)
+            val snapshot = rateFor(peer).update(transferred, total)
             val fraction = if (total > 0) snapshot.fraction.toFloat() else 1f
             val percentText = "${(fraction * 100).toInt()}%"
             val bytesText = "${formatBytes(transferred)} / ${formatBytes(total)}・${snapshot.rateText}"
 
-            val state = _transferState.updateAndGet { current ->
-                val title = current?.title ?: (p.fileName ?: "傳輸中")
-                val status = if (isFolder) "第 ${p.entryIndex}/${p.totalEntries} 個檔案:${p.fileName}\n$bytesText" else bytesText
-                TransferUiState(title, status, fraction, percentText)
-            }
-            state?.let { notifyTransferProgress(it, p.direction, percentText, snapshot.rateText) }
+            val current = _peerTransfers.value[peer.peerId]
+            val title = current?.title ?: (p.fileName ?: "傳輸中")
+            val status = if (isFolder) "第 ${p.entryIndex}/${p.totalEntries} 個檔案:${p.fileName}\n$bytesText" else bytesText
+            val state = TransferUiState(title, status, fraction, percentText)
+            setTransfer(peer.peerId, state)
+            notifyTransferProgress(state, p.direction, percentText, snapshot.rateText)
         }
 
-        connectionEngine.onFileTransferEnded = { ended ->
-            _transferState.value = null
-            clearIncomingTransferNotification()
-            notifyTransferEnded(ended.reason, formatFileEndedMessage(ended))
+        connectionEngine.onFileTransferEnded = { peer, ended ->
+            setTransfer(peer.peerId, null)
+            if (_peerTransfers.value.isEmpty()) clearIncomingTransferNotification()
+            val message = formatFileEndedMessage(peer.name, ended)
+            notifyTransferEnded(ended.reason, message)
             recordTransfer(
-                TransferRecord(ended.direction, ended.reason, ended.fileName, isFolder = false, savedUri = ended.savedUri)
+                peer,
+                TransferRecord(ended.direction, ended.reason, ended.fileName, isFolder = false, savedUri = ended.savedUri, peerName = peer.name),
             )
-            pushEvent(formatFileEndedMessage(ended))
+            pushEvent(message)
         }
 
-        connectionEngine.onFolderTransferEnded = { ended ->
-            _transferState.value = null
-            clearIncomingTransferNotification()
-            notifyTransferEnded(ended.reason, formatFolderEndedMessage(ended))
+        connectionEngine.onFolderTransferEnded = { peer, ended ->
+            setTransfer(peer.peerId, null)
+            if (_peerTransfers.value.isEmpty()) clearIncomingTransferNotification()
+            val message = formatFolderEndedMessage(peer.name, ended)
+            notifyTransferEnded(ended.reason, message)
             recordTransfer(
+                peer,
                 TransferRecord(
                     ended.direction, ended.reason,
                     if (ended.isBatch) "${ended.entryCount} 個檔案" else ended.folderName,
                     isFolder = true,
-                )
+                    peerName = peer.name,
+                ),
             )
-            pushEvent(formatFolderEndedMessage(ended))
+            pushEvent(message)
         }
     }
 
-    private fun recordTransfer(record: TransferRecord) {
+    private fun recordTransfer(peer: PeerConnection, record: TransferRecord) {
         _transferHistory.update { (listOf(record) + it).take(MAX_TRANSFER_HISTORY) }
-        _completedTransfer.value = if (record.canOpen) record else null
+        setCompletedTransfer(peer.peerId, if (record.canOpen) record else null)
     }
 
     private fun upsert(list: List<DiscoveredDevice>, device: DiscoveredDevice): List<DiscoveredDevice> {
@@ -799,43 +891,43 @@ class ConnectItService : LifecycleService() {
         _events.tryEmit(message)
     }
 
-    private fun formatFileEndedMessage(e: FileTransferEnded): String = when (e.reason) {
+    private fun formatFileEndedMessage(peerName: String, e: FileTransferEnded): String = when (e.reason) {
         TransferEndReason.COMPLETED -> if (e.direction == TransferDirection.RECEIVING) {
-            "已收到檔案「${e.fileName}」,已儲存到 $downloadDisplayPath。"
+            "已收到 $peerName 傳來的「${e.fileName}」,已儲存到 $downloadDisplayPath。"
         } else {
-            "「${e.fileName}」傳送完成。"
+            "「${e.fileName}」已傳送給 $peerName。"
         }
-        TransferEndReason.REJECTED -> "對方拒絕接收「${e.fileName}」。"
+        TransferEndReason.REJECTED -> "$peerName 拒絕接收「${e.fileName}」。"
         TransferEndReason.CANCELLED -> "已取消「${e.fileName}」的傳輸。"
-        TransferEndReason.CANCELLED_BY_REMOTE -> "對方取消了「${e.fileName}」的傳輸。"
-        TransferEndReason.CONNECTION_CLOSED -> "連線已中斷,「${e.fileName}」的傳輸已中止。"
+        TransferEndReason.CANCELLED_BY_REMOTE -> "$peerName 取消了「${e.fileName}」的傳輸。"
+        TransferEndReason.CONNECTION_CLOSED -> "與 $peerName 的連線已中斷,「${e.fileName}」的傳輸已中止。"
         TransferEndReason.FAILED -> "「${e.fileName}」傳輸失敗。"
     }
 
-    private fun formatFolderEndedMessage(e: FolderTransferEnded): String = if (e.isBatch) {
+    private fun formatFolderEndedMessage(peerName: String, e: FolderTransferEnded): String = if (e.isBatch) {
         when (e.reason) {
             TransferEndReason.COMPLETED -> if (e.direction == TransferDirection.RECEIVING) {
-                "已收到 ${e.entryCount} 個檔案,已儲存到 $downloadDisplayPath。"
+                "已收到 $peerName 傳來的 ${e.entryCount} 個檔案,已儲存到 $downloadDisplayPath。"
             } else {
-                "${e.entryCount} 個檔案傳送完成。"
+                "${e.entryCount} 個檔案已傳送給 $peerName。"
             }
-            TransferEndReason.REJECTED -> "對方拒絕接收這些檔案。"
+            TransferEndReason.REJECTED -> "$peerName 拒絕接收這些檔案。"
             TransferEndReason.CANCELLED -> "已取消傳輸(已完成 ${e.entryCount} 個檔案)。"
-            TransferEndReason.CANCELLED_BY_REMOTE -> "對方取消了傳輸(已完成 ${e.entryCount} 個檔案)。"
-            TransferEndReason.CONNECTION_CLOSED -> "連線已中斷,傳輸已中止(已完成 ${e.entryCount} 個檔案)。"
+            TransferEndReason.CANCELLED_BY_REMOTE -> "$peerName 取消了傳輸(已完成 ${e.entryCount} 個檔案)。"
+            TransferEndReason.CONNECTION_CLOSED -> "與 $peerName 的連線已中斷,傳輸已中止(已完成 ${e.entryCount} 個檔案)。"
             TransferEndReason.FAILED -> "傳輸失敗(已完成 ${e.entryCount} 個檔案)。"
         }
     } else {
         when (e.reason) {
             TransferEndReason.COMPLETED -> if (e.direction == TransferDirection.RECEIVING) {
-                "已收到資料夾「${e.folderName}」(共 ${e.entryCount} 個檔案),已儲存到 ${e.savedFolderPath ?: downloadDisplayPath}。"
+                "已收到 $peerName 傳來的資料夾「${e.folderName}」(共 ${e.entryCount} 個檔案),已儲存到 ${e.savedFolderPath ?: downloadDisplayPath}。"
             } else {
-                "資料夾「${e.folderName}」傳送完成(共 ${e.entryCount} 個檔案)。"
+                "資料夾「${e.folderName}」已傳送給 $peerName(共 ${e.entryCount} 個檔案)。"
             }
-            TransferEndReason.REJECTED -> "對方拒絕接收資料夾「${e.folderName}」。"
+            TransferEndReason.REJECTED -> "$peerName 拒絕接收資料夾「${e.folderName}」。"
             TransferEndReason.CANCELLED -> "已取消資料夾「${e.folderName}」的傳輸(已完成 ${e.entryCount} 個檔案)。"
-            TransferEndReason.CANCELLED_BY_REMOTE -> "對方取消了資料夾「${e.folderName}」的傳輸(已完成 ${e.entryCount} 個檔案)。"
-            TransferEndReason.CONNECTION_CLOSED -> "連線已中斷,資料夾「${e.folderName}」的傳輸已中止(已完成 ${e.entryCount} 個檔案)。"
+            TransferEndReason.CANCELLED_BY_REMOTE -> "$peerName 取消了資料夾「${e.folderName}」的傳輸(已完成 ${e.entryCount} 個檔案)。"
+            TransferEndReason.CONNECTION_CLOSED -> "與 $peerName 的連線已中斷,資料夾「${e.folderName}」的傳輸已中止(已完成 ${e.entryCount} 個檔案)。"
             TransferEndReason.FAILED -> "資料夾「${e.folderName}」傳輸失敗(已完成 ${e.entryCount} 個檔案)。"
         }
     }
@@ -907,10 +999,8 @@ class ConnectItService : LifecycleService() {
     }
 
     /** 收到檔案/資料夾提議並自動接受時呼叫,讓使用者(尤其是 App 在背景時)知道現在有東西傳進來。 */
-    private fun notifyIncomingTransfer(itemName: String) {
+    private fun notifyIncomingTransfer(peerName: String, itemName: String) {
         if (!cachedSettings.notificationsEnabled) return
-        val peerName = (_connectionState.value as? ConnectionUiState.Connected)?.peer?.name
-            ?: getString(R.string.notification_incoming_transfer_unknown_peer)
 
         val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
             .setContentTitle(getString(R.string.notification_incoming_transfer_title, peerName))

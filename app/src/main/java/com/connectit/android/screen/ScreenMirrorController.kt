@@ -4,7 +4,7 @@ import android.content.Context
 import android.media.projection.MediaProjection
 import android.os.Build
 import android.os.SystemClock
-import com.connectit.android.connection.ConnectionEngine
+import com.connectit.android.connection.PeerConnection
 import com.connectit.android.net.MAX_FRAMES_IN_FLIGHT
 import com.connectit.android.net.ScreenMessage
 import com.connectit.android.net.ScreenRejectReason
@@ -87,7 +87,8 @@ sealed interface ScreenMirrorState {
 }
 
 /**
- * 螢幕鏡像的狀態機(分享端與觀看端都在這裡),跑在已配對的 [ConnectionEngine] 連線上,協定見 [ScreenMessage]。
+ * 螢幕鏡像的狀態機(分享端與觀看端都在這裡),跑在已配對的連線([PeerConnection])上,協定見 [ScreenMessage]。
+ * 可以同時連線多台裝置,但螢幕鏡像同一時間只跟其中一台進行([peer]);其他裝置送來的請求一律回忙碌。
  *
  * 所有狀態轉換都排到 [confined](同一時間只跑一個工作的 dispatcher)上執行:UI 操作、讀取迴圈送來的
  * 訊息、系統擷取權限的結果分別來自不同執行緒,這樣不用到處加鎖也不會有競爭。
@@ -96,13 +97,16 @@ sealed interface ScreenMirrorState {
 class ScreenMirrorController(
     private val context: Context,
     private val scope: CoroutineScope,
-    private val engine: ConnectionEngine,
     /** 給使用者看的訊息(Snackbar/近期紀錄)。 */
     private val onNotice: (String) -> Unit,
     /** 不再需要 MediaProjection 時呼叫,讓服務把前景服務類型改回只有 dataSync。 */
     private val onProjectionReleased: () -> Unit,
 ) {
     private val confined = Dispatchers.Default.limitedParallelism(1)
+
+    /** 目前(或最近一次)鏡像工作階段的對象。回到 Idle 時不清掉,讓結束時送出的 screen-stop 還能送到對的裝置。 */
+    @Volatile var peer: PeerConnection? = null
+        private set
 
     private val _state = MutableStateFlow<ScreenMirrorState>(ScreenMirrorState.Idle)
     val state: StateFlow<ScreenMirrorState> = _state.asStateFlow()
@@ -134,7 +138,7 @@ class ScreenMirrorController(
     private val shownSeq = AtomicInteger(0)
 
     /** 我方要送出的 ack 與操作事件:用單一工作依序送出,點擊的按下/放開才不會因為並行送出而前後顛倒。 */
-    private val outgoing = Channel<ScreenMessage>(Channel.UNLIMITED)
+    private val outgoing = Channel<Pair<PeerConnection, ScreenMessage>>(Channel.UNLIMITED)
 
     /** 要送出的聲音片段,由單一工作依序送出;網路塞住時只保留最新的一小段,舊的丟掉(聲音晚到不如不要)。 */
     private val outgoingAudio = Channel<ByteArray>(capacity = 25, onBufferOverflow = BufferOverflow.DROP_OLDEST)
@@ -143,11 +147,11 @@ class ScreenMirrorController(
     // 它們一定要宣告在 init 之前,否則背景工作會讀到還是 null 的欄位(啟動時就閃退)。
     init {
         scope.launch(Dispatchers.IO) {
-            for (message in outgoing) engine.sendScreenMessage(message)
+            for ((target, message) in outgoing) target.sendScreenMessage(message)
         }
         scope.launch(Dispatchers.IO) {
             for (pcm in outgoingAudio) {
-                if (_state.value is ScreenMirrorState.Sharing) engine.sendScreenAudio(pcm, pcm.size)
+                if (_state.value is ScreenMirrorState.Sharing) peer?.sendScreenAudio(pcm, pcm.size)
             }
         }
         repeat(DECODE_WORKERS) {
@@ -174,8 +178,9 @@ class ScreenMirrorController(
     // ===================== UI 操作 =====================
 
     /** 請對方分享他的螢幕給我看。 */
-    fun requestViewPeer() = launchConfined {
-        if (_state.value != ScreenMirrorState.Idle || !engine.isConnected) return@launchConfined
+    fun requestViewPeer(target: PeerConnection) = launchConfined {
+        if (_state.value != ScreenMirrorState.Idle || target.isClosed) return@launchConfined
+        peer = target
         val id = newSessionId()
         _state.value = ScreenMirrorState.OutgoingRequest(id)
         send(ScreenMessage(ScreenMessage.REQUEST, sessionId = id))
@@ -183,8 +188,9 @@ class ScreenMirrorController(
     }
 
     /** 我要分享我的螢幕:先跳出系統的擷取確認,拿到權限後才送出邀請。 */
-    fun startShareOffer(allowControl: Boolean, shareAudio: Boolean = false) = launchConfined {
-        if (_state.value != ScreenMirrorState.Idle || !engine.isConnected) return@launchConfined
+    fun startShareOffer(target: PeerConnection, allowControl: Boolean, shareAudio: Boolean = false) = launchConfined {
+        if (_state.value != ScreenMirrorState.Idle || target.isClosed) return@launchConfined
+        peer = target
         _state.value = ScreenMirrorState.AwaitingProjection(newSessionId(), ProjectionPurpose.OFFER, allowControl, shareAudio)
     }
 
@@ -311,8 +317,8 @@ class ScreenMirrorController(
     }
 
     /** 收到一段聲音(讀取迴圈上呼叫),直接排進播放器的佇列。 */
-    fun handleAudio(pcm: ByteArray) {
-        if (_state.value !is ScreenMirrorState.Viewing) return
+    fun handleAudio(sender: PeerConnection, pcm: ByteArray) {
+        if (_state.value !is ScreenMirrorState.Viewing || sender != peer) return
         audioPlayer?.enqueue(pcm)
     }
 
@@ -349,12 +355,13 @@ class ScreenMirrorController(
     fun sendInput(message: ScreenMessage) {
         val current = _state.value as? ScreenMirrorState.Viewing ?: return
         if (!current.allowControl) return
-        outgoing.trySend(message.copy(type = ScreenMessage.INPUT, sessionId = current.sessionId))
+        val target = peer ?: return
+        outgoing.trySend(target to message.copy(type = ScreenMessage.INPUT, sessionId = current.sessionId))
     }
 
-    /** 連線已經中斷(不論哪一方造成的):不能再送任何訊息,直接清理。 */
-    fun onConnectionClosed() = launchConfined {
-        if (_state.value != ScreenMirrorState.Idle) {
+    /** 某一條連線已經中斷(不論哪一方造成的):是鏡像中的那台的話,不能再送任何訊息,直接清理。 */
+    fun onConnectionClosed(closed: PeerConnection) = launchConfined {
+        if (_state.value != ScreenMirrorState.Idle && closed == peer) {
             cleanup()
         }
     }
@@ -362,7 +369,13 @@ class ScreenMirrorController(
     // ===================== 收到對方的訊息 =====================
 
     /** 在連線的讀取迴圈上呼叫,這裡只負責把工作排進 [confined]。 */
-    fun handleMessage(message: ScreenMessage) {
+    fun handleMessage(sender: PeerConnection, message: ScreenMessage) {
+        if (message.type == ScreenMessage.REQUEST || message.type == ScreenMessage.OFFER) {
+            launchConfined { handleControl(sender, message) }
+            return
+        }
+        // 不是鏡像對象送來的訊息(例如舊工作階段的殘留),忽略。
+        if (sender != peer) return
         if (message.type == ScreenMessage.ACK) {
             // 確認訊息很頻繁(每張畫面一則),而且只改兩個欄位,直接處理不用排隊。
             val seq = message.seq ?: return
@@ -378,18 +391,20 @@ class ScreenMirrorController(
             }
             return
         }
-        launchConfined { handleControl(message) }
+        launchConfined { handleControl(sender, message) }
     }
 
-    private suspend fun handleControl(message: ScreenMessage) {
+    private suspend fun handleControl(sender: PeerConnection, message: ScreenMessage) {
         val id = message.sessionId ?: return
         val current = _state.value
         when (message.type) {
             ScreenMessage.REQUEST, ScreenMessage.OFFER -> {
                 if (current != ScreenMirrorState.Idle) {
-                    send(ScreenMessage(ScreenMessage.REJECT, sessionId = id, reason = ScreenRejectReason.BUSY))
+                    // 已經在跟另一台(或同一台)進行螢幕鏡像,直接回忙碌。
+                    send(ScreenMessage(ScreenMessage.REJECT, sessionId = id, reason = ScreenRejectReason.BUSY), sender)
                     return
                 }
+                peer = sender
                 _state.value = if (message.type == ScreenMessage.REQUEST) {
                     ScreenMirrorState.IncomingRequest(id)
                 } else {
@@ -430,7 +445,8 @@ class ScreenMirrorController(
     }
 
     /** 收到一張畫面(讀取迴圈上呼叫)。解碼排到 [confined],解完才回 ack,分享端就不會送得比我們解得快。 */
-    fun handleFrame(payload: ByteArray) {
+    fun handleFrame(sender: PeerConnection, payload: ByteArray) {
+        if (sender != peer) return
         val current = _state.value as? ScreenMirrorState.Viewing ?: return
         if (payload.size <= 4) return
         decodeQueue.trySend(current.sessionId to payload)
@@ -439,7 +455,7 @@ class ScreenMirrorController(
     private fun decodeAndShow(decoder: ScreenFrameDecoder, sessionId: String, payload: ByteArray) {
         val seq = ScreenFrameDecoder.readSeq(payload)
         val decoded = if ((_state.value as? ScreenMirrorState.Viewing)?.sessionId == sessionId) decoder.decode(payload) else null
-        outgoing.trySend(ScreenMessage(ScreenMessage.ACK, sessionId = sessionId, seq = seq))
+        peer?.let { outgoing.trySend(it to ScreenMessage(ScreenMessage.ACK, sessionId = sessionId, seq = seq)) }
         if (decoded == null || (_state.value as? ScreenMirrorState.Viewing)?.sessionId != sessionId) return
         // 兩個工作同時解碼,晚到的舊畫面直接丟掉,不要讓畫面倒退。
         while (true) {
@@ -583,7 +599,7 @@ class ScreenMirrorController(
                 val (buffer, length) = capturer.encodeLatest(ScreenCapturer.DEFAULT_QUALITY) ?: continue
                 val seq = lastSentSeq + 1
                 ScreenFrameDecoder.writeSeq(buffer, seq)
-                engine.sendScreenFrame(buffer, length)
+                (peer ?: break).sendScreenFrame(buffer, length)
                 lastSentSeq = seq
                 // 限制最高約 60fps:畫面一直在動(例如播影片)時不要把 CPU/網路吃滿。
                 val spent = SystemClock.elapsedRealtime() - startedAt
@@ -638,8 +654,9 @@ class ScreenMirrorController(
         timeoutJob = null
     }
 
-    private suspend fun send(message: ScreenMessage) {
-        engine.sendScreenMessage(message)
+    /** 送給 [target],沒指定就送給目前鏡像的對象。 */
+    private suspend fun send(message: ScreenMessage, target: PeerConnection? = peer) {
+        target?.sendScreenMessage(message)
     }
 
     private fun describeReject(reason: String?): String = when (reason) {

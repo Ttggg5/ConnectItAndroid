@@ -55,6 +55,8 @@ fun TvDevicesScreen(service: ConnectItService) {
         initial = AppSettings(service.settingsRepository.defaultDeviceName(), AppThemeMode.AUTO)
     )
     val connectedPeer = (connectionState as? ConnectionUiState.Connected)?.peer
+    val connectedPeers by service.connectedPeers.collectAsState()
+    val connectedAddresses = connectedPeers.map { it.address }.toSet()
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -108,9 +110,9 @@ fun TvDevicesScreen(service: ConnectItService) {
             items(devices, key = { it.key }) { device ->
                 TvDeviceCard(
                     device = device,
-                    isConnected = connectedPeer != null && device.host == connectedPeer.address,
+                    isConnected = device.host in connectedAddresses,
                     onConnect = {
-                        if (connectedPeer == null) service.connectTo(device, settings.deviceName)
+                        if (device.host !in connectedAddresses) service.connectTo(device, settings.deviceName)
                     },
                 )
             }

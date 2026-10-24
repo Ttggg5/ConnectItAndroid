@@ -12,7 +12,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -39,6 +41,8 @@ import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.DriveFolderUpload
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -82,6 +86,8 @@ fun ConnectionPanel(service: ConnectItService, peer: ConnectedPeer, modifier: Mo
     val transferState by service.transferState.collectAsState()
     val completed by service.completedTransfer.collectAsState()
     val history by service.transferHistory.collectAsState()
+    val connectedPeers by service.connectedPeers.collectAsState()
+    val multiplePeers = connectedPeers.size > 1
 
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
@@ -99,7 +105,15 @@ fun ConnectionPanel(service: ConnectItService, peer: ConnectedPeer, modifier: Mo
     }
 
     BrandCard(modifier = modifier.fillMaxWidth()) {
-        Text("目前連線", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            if (multiplePeers) "目前連線(${connectedPeers.size} 台)" else "目前連線",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (multiplePeers) {
+            Spacer(Modifier.height(8.dp))
+            PeerSwitcher(service = service, peers = connectedPeers, selectedPeerId = peer.peerId)
+        }
         Spacer(Modifier.height(14.dp))
 
         // 兩台裝置 + 中間的連線線條
@@ -168,6 +182,9 @@ fun ConnectionPanel(service: ConnectItService, peer: ConnectedPeer, modifier: Mo
                 onClick = { pickFolder.launch(null) },
                 modifier = Modifier.weight(1f),
             )
+        }
+        if (multiplePeers) {
+            SendToAllRow(service = service)
         }
         Text(
             "也可以在相簿或檔案 App 裡按「分享」→ ConnectIt 直接傳過來。",
@@ -250,7 +267,7 @@ fun ConnectionPanel(service: ConnectItService, peer: ConnectedPeer, modifier: Mo
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.History, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("這次連線的傳輸紀錄", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("傳輸紀錄", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Spacer(Modifier.height(4.dp))
             history.take(MAX_VISIBLE_HISTORY).forEach { record ->
@@ -329,7 +346,7 @@ private fun TransferHistoryRow(record: TransferRecord, onOpen: () -> Unit) {
         Column(Modifier.weight(1f)) {
             Text(record.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
-                "${record.statusText}・$timeText",
+                listOf(record.statusText, record.peerName, timeText).filter { it.isNotEmpty() }.joinToString("・"),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -363,5 +380,43 @@ private fun openTransferRecord(context: Context, record: TransferRecord) {
         Toast.makeText(context, "沒有可以開啟這個檔案的 App", Toast.LENGTH_SHORT).show()
     } catch (e: SecurityException) {
         Toast.makeText(context, "無法開啟這個檔案,可能已經被移動或刪除", Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** 同時連線多台時:切換「目前連線」卡片顯示哪一台(傳送、鏡像、中斷連線都作用在選取的那台)。 */
+@Composable
+fun PeerSwitcher(service: ConnectItService, peers: List<ConnectedPeer>, selectedPeerId: String, modifier: Modifier = Modifier) {
+    val transfers by service.peerTransfers.collectAsState()
+    FlowRow(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        peers.forEach { candidate ->
+            val status = transfers[candidate.peerId]?.let { state -> state.percentText?.let { "傳輸中 $it" } ?: "準備傳輸" }
+            FilterChip(
+                selected = candidate.peerId == selectedPeerId,
+                onClick = { service.selectPeer(candidate.peerId) },
+                label = {
+                    Column(Modifier.padding(vertical = 4.dp)) {
+                        Text(candidate.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        status?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    }
+                },
+            )
+        }
+    }
+}
+
+/** 「同時傳給所有已連線的裝置」:勾選後傳送檔案/資料夾會分別送給每一台(正在傳輸中的會略過)。 */
+@Composable
+private fun SendToAllRow(service: ConnectItService) {
+    val sendToAll by service.sendToAll.collectAsState()
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable { service.setSendToAll(!sendToAll) },
+    ) {
+        Checkbox(checked = sendToAll, onCheckedChange = { service.setSendToAll(it) })
+        Text("同時傳給所有已連線的裝置", style = MaterialTheme.typography.bodyMedium)
     }
 }

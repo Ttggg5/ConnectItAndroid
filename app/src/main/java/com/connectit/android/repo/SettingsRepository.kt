@@ -13,6 +13,8 @@ import com.connectit.android.video.VideoLibraryScanner
 import com.connectit.android.video.VideoServerPlaybackOptions
 import com.connectit.android.video.VideoSort
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import java.util.UUID
 import kotlinx.coroutines.flow.map
 
 enum class AppThemeMode { LIGHT, DARK, AUTO }
@@ -81,6 +83,7 @@ class SettingsRepository(private val context: Context) {
         val VIDEO_DEFAULT_SPEED = doublePreferencesKey("video_default_speed")
         val VIDEO_EXTRA_EXTENSIONS = stringPreferencesKey("video_extra_extensions")
         val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
+        val DEVICE_ID = stringPreferencesKey("device_id")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -192,4 +195,17 @@ class SettingsRepository(private val context: Context) {
     }
 
     fun defaultDeviceName(): String = Build.MODEL ?: "Android"
+
+    /**
+     * 這台裝置的穩定識別碼(第一次呼叫時產生後就固定不變),交握時送給對方、也放在 mDNS TXT 記錄裡。
+     * 裝置名稱可以改、也可能重複,同一台裝置重新連線時要靠這個認出來(對應 Windows 端 DeviceSettingsService.DeviceId)。
+     */
+    suspend fun getOrCreateDeviceId(): String {
+        context.dataStore.data.first()[Keys.DEVICE_ID]?.let { return it }
+        var id = ""
+        context.dataStore.edit { prefs ->
+            id = prefs[Keys.DEVICE_ID] ?: UUID.randomUUID().toString().replace("-", "").also { prefs[Keys.DEVICE_ID] = it }
+        }
+        return id
+    }
 }

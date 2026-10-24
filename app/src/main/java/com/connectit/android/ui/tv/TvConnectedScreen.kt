@@ -55,6 +55,9 @@ fun TvConnectionPanel(service: ConnectItService, peer: ConnectedPeer) {
     val transferState by service.transferState.collectAsState()
     val history by service.transferHistory.collectAsState()
     val screenMirrorState by service.screenMirror.state.collectAsState()
+    val connectedPeers by service.connectedPeers.collectAsState()
+    val peerTransfers by service.peerTransfers.collectAsState()
+    val sendToAll by service.sendToAll.collectAsState()
 
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
@@ -81,13 +84,34 @@ fun TvConnectionPanel(service: ConnectItService, peer: ConnectedPeer) {
                 GradientAvatar(icon = Icons.Filled.Devices, size = 56.dp)
                 Spacer(Modifier.width(18.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("目前連線", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        if (connectedPeers.size > 1) "目前連線(${connectedPeers.size} 台)" else "目前連線",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     Text(peer.name, style = MaterialTheme.typography.headlineSmall)
                     Text(peer.address, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = BrandColors.Success)
                 Spacer(Modifier.width(8.dp))
                 Text("已連線", style = MaterialTheme.typography.titleMedium, color = BrandColors.Success)
+            }
+
+            if (connectedPeers.size > 1) {
+                // 同時連線多台時:切換這張卡片顯示哪一台(傳送、鏡像、中斷連線都作用在選取的那台)。
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    connectedPeers.forEach { candidate ->
+                        val label = peerTransfers[candidate.peerId]?.percentText?.let { "${candidate.name}・$it" } ?: candidate.name
+                        if (candidate.peerId == peer.peerId) {
+                            Button(onClick = {}) { Text(label) }
+                        } else {
+                            OutlinedButton(onClick = { service.selectPeer(candidate.peerId) }) { Text(label) }
+                        }
+                    }
+                }
+                OutlinedButton(onClick = { service.setSendToAll(!sendToAll) }) {
+                    Text(if (sendToAll) "✓ 同時傳給所有已連線的裝置" else "同時傳給所有已連線的裝置")
+                }
             }
 
             val transferActive = transferState != null
@@ -127,12 +151,12 @@ fun TvConnectionPanel(service: ConnectItService, peer: ConnectedPeer) {
                     }
                 } else {
                     val idle = screenMirrorState == ScreenMirrorState.Idle
-                    OutlinedButton(onClick = { service.screenMirror.requestViewPeer() }, enabled = idle) {
+                    OutlinedButton(onClick = { service.requestViewPeerScreen() }, enabled = idle) {
                         Icon(Icons.Filled.CastConnected, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
                         Text("觀看對方螢幕")
                     }
-                    OutlinedButton(onClick = { service.screenMirror.startShareOffer(allowControl = false, shareAudio = ScreenAudioFormat.captureSupported) }, enabled = idle) {
+                    OutlinedButton(onClick = { service.startScreenShareOffer(allowControl = false, shareAudio = ScreenAudioFormat.captureSupported) }, enabled = idle) {
                         Icon(Icons.Filled.ScreenShare, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
                         Text("分享我的螢幕")
