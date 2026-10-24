@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import android.view.KeyEvent
 import androidx.activity.viewModels
 import com.connectit.android.net.RemoteKeys
+import com.connectit.android.quicksend.ShareShortcuts
 import com.connectit.android.screen.RemoteControlPhase
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -42,6 +43,12 @@ class MainActivity : ComponentActivity() {
 
     private val legacyStoragePermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    /** 快速設定磚(ACTION_QUICK_SEND):直接開檔案選擇器,選好之後走跟「分享」進來一樣的選裝置流程。 */
+    private val quickSendPicker =
+        registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            if (uris.isNotEmpty()) viewModel.setPendingShare(uris)
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -124,14 +131,25 @@ class MainActivity : ComponentActivity() {
 
     /** 從其他 App 按「分享」→ ConnectIt 進來時,把分享的檔案交給畫面讓使用者選擇要傳給哪台裝置。 */
     private fun handleShareIntent(intent: Intent?) {
+        if (intent?.action == ACTION_QUICK_SEND) {
+            quickSendPicker.launch(arrayOf("*/*"))
+            return
+        }
         val uris: List<Uri> = when (intent?.action) {
             Intent.ACTION_SEND -> listOfNotNull(intent.streamExtra())
             Intent.ACTION_SEND_MULTIPLE -> intent.streamListExtra()
             else -> emptyList()
         }
         if (uris.isNotEmpty()) {
-            viewModel.setPendingShare(uris)
+            // 從分享面板最上排(Direct Share)點了某台裝置:直接傳給那台。
+            val targetDeviceId = ShareShortcuts.deviceIdFromShortcutId(intent?.getStringExtra(Intent.EXTRA_SHORTCUT_ID))
+            viewModel.setPendingShare(uris, targetDeviceId)
         }
+    }
+
+    companion object {
+        /** 快速設定磚送來的 action(見 QuickSendTileService)。 */
+        const val ACTION_QUICK_SEND = "com.connectit.android.action.QUICK_SEND"
     }
 
     @Suppress("DEPRECATION")

@@ -122,6 +122,8 @@ data class ConnectedPeer(
     val peerId: String,
     val name: String,
     val address: String,
+    /** 對方的穩定裝置識別碼(舊版沒有時為 null)。 */
+    val deviceId: String? = null,
 )
 
 /** 使用者要傳送出去的項目:單一檔案的 uri/名稱/大小,或整個資料夾/多檔案批次。 */

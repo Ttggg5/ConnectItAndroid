@@ -80,6 +80,7 @@ import com.connectit.android.ui.components.RemoteControlHost
 import com.connectit.android.ui.components.RemoteControlScreen
 import com.connectit.android.ui.components.ResumeOfferDialog
 import com.connectit.android.ui.components.GradientAvatar
+import com.connectit.android.ui.components.GhostButton
 import com.connectit.android.ui.components.GradientButton
 import com.connectit.android.ui.components.RadarPulse
 import com.connectit.android.ui.components.ScreenMirrorHost
@@ -134,6 +135,7 @@ fun ConnectItApp(service: ConnectItService, viewModel: MainViewModel) {
     val screenMirrorState by service.screenMirror.state.collectAsState()
     val remoteControlState by service.remoteControl.state.collectAsState()
     val pendingShare by viewModel.pendingShare.collectAsState()
+    val pendingShareTargetDeviceId by viewModel.pendingShareTargetDeviceId.collectAsState()
     // 初始值 null 代表 DataStore 還沒讀出來:這段期間不要決定要不要顯示引導,避免閃一下。
     val settings by service.settingsRepository.settings.collectAsState(initial = null)
 
@@ -338,6 +340,7 @@ fun ConnectItApp(service: ConnectItService, viewModel: MainViewModel) {
         ShareTargetSheet(
             service = service,
             uris = pendingShare,
+            targetDeviceId = pendingShareTargetDeviceId,
             settings = currentSettings,
             onDone = { viewModel.clearPendingShare() },
             onSent = { tab = AppTab.DEVICES },
@@ -399,6 +402,8 @@ private fun MainScaffold(
 private fun ShareTargetSheet(
     service: ConnectItService,
     uris: List<Uri>,
+    /** 從分享面板最上排(Direct Share)點了某台裝置時,那台的裝置識別碼:找得到就直接傳,不用再選。 */
+    targetDeviceId: String?,
     settings: AppSettings,
     onDone: () -> Unit,
     onSent: () -> Unit,
@@ -406,8 +411,7 @@ private fun ShareTargetSheet(
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val devices by service.devices.collectAsState()
-    val connectionState by service.connectionState.collectAsState()
-    val peer = (connectionState as? ConnectionUiState.Connected)?.peer
+    val connectedPeers by service.connectedPeers.collectAsState()
     val files = remember(uris) {
         uris.map { uri ->
             val (name, size) = SafUtils.queryNameAndSize(context.contentResolver, uri)
@@ -415,11 +419,32 @@ private fun ShareTargetSheet(
         }
     }
 
-    fun send() {
-        service.sendFiles(files)
+    fun sendTo(peerIds: List<String>) {
+        service.sendFilesTo(peerIds, files)
         onSent()
         onDone()
     }
+
+    fun connectThenSend(device: DiscoveredDevice) {
+        // 對方接受後才傳送(連上的那台會變成選取中的那台);Service 會顯示「等待對方接受」對話框與失敗原因。
+        service.connectTo(device, settings.deviceName, onAccepted = {
+            service.sendFilesTo(listOfNotNull(service.selectedPeerId.value), files)
+        })
+        onSent()
+        onDone()
+    }
+
+    // Direct Share:已連線就直接傳;還沒連線但在附近找得到就先連線(裝置可能晚一點才被搜尋到,所以跟著清單重新檢查)。
+    LaunchedEffect(targetDeviceId, connectedPeers, devices) {
+        val target = targetDeviceId ?: return@LaunchedEffect
+        connectedPeers.firstOrNull { it.deviceId == target }?.let {
+            sendTo(listOf(it.peerId))
+            return@LaunchedEffect
+        }
+        devices.firstOrNull { it.deviceId == target && !it.needsUpdate }?.let { connectThenSend(it) }
+    }
+    val connectedAddresses = connectedPeers.map { it.address }.toSet()
+    val otherDevices = devices.filter { it.host !in connectedAddresses }
 
     ModalBottomSheet(onDismissRequest = onDone, sheetState = sheetState, containerColor = MaterialTheme.colorScheme.surfaceContainer) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
@@ -440,52 +465,66 @@ private fun ShareTargetSheet(
             }
             Spacer(Modifier.height(18.dp))
 
-            if (peer != null) {
-                GradientButton(
-                    onClick = ::send,
-                    text = "傳送給 ${peer.name}",
-                    icon = Icons.AutoMirrored.Filled.Send,
-                    modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(vertical = 14.dp),
-                )
-            } else {
-                Text("選擇要傳送給哪台裝置", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (connectedPeers.isNotEmpty()) {
+                Text("傳給已連線的裝置", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(8.dp))
-                if (devices.isEmpty()) {
-                    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                        RadarPulse(icon = Icons.Filled.SettingsInputAntenna, size = 120.dp)
-                        Text(
-                            "正在搜尋附近的裝置…",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    connectedPeers.forEach { connected ->
+                        GradientButton(
+                            onClick = { sendTo(listOf(connected.peerId)) },
+                            text = "傳送給 ${connected.name}",
+                            icon = Icons.AutoMirrored.Filled.Send,
+                            modifier = Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(vertical = 14.dp),
                         )
                     }
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        devices.forEach { device ->
-                            Surface(
-                                onClick = {
-                                    // 對方接受後才傳送;Service 會顯示「等待對方接受」對話框與失敗原因。
-                                    service.connectTo(device, settings.deviceName, onAccepted = { service.sendFiles(files) })
-                                    onSent()
-                                    onDone()
-                                },
-                                shape = RoundedCornerShape(16.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant,
-                            ) {
-                                Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    GradientAvatar(icon = Icons.Filled.Devices, size = 40.dp)
-                                    Spacer(Modifier.width(12.dp))
-                                    Column(Modifier.weight(1f)) {
-                                        Text(device.displayName, style = MaterialTheme.typography.titleSmall)
-                                        Text(
-                                            "${device.host}:${device.port}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "傳送", tint = MaterialTheme.colorScheme.primary)
+                    if (connectedPeers.size > 1) {
+                        GhostButton(
+                            onClick = { sendTo(connectedPeers.map { it.peerId }) },
+                            text = "傳給全部 ${connectedPeers.size} 台",
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+            }
+
+            Text(
+                if (connectedPeers.isEmpty()) "選擇要傳送給哪台裝置" else "或傳給附近的其他裝置(會先送出連線請求)",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            if (otherDevices.isEmpty()) {
+                Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                    RadarPulse(icon = Icons.Filled.SettingsInputAntenna, size = 120.dp)
+                    Text(
+                        "正在搜尋附近的裝置…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    otherDevices.forEach { device ->
+                        Surface(
+                            onClick = { connectThenSend(device) },
+                            enabled = !device.needsUpdate,
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                        ) {
+                            Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                GradientAvatar(icon = Icons.Filled.Devices, size = 40.dp)
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(device.displayName, style = MaterialTheme.typography.titleSmall)
+                                    Text(
+                                        if (device.needsUpdate) "需要更新才能連線" else "${device.host}:${device.port}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
                                 }
+                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "傳送", tint = MaterialTheme.colorScheme.primary)
                             }
                         }
                     }

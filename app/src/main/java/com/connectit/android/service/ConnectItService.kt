@@ -30,6 +30,7 @@ import com.connectit.android.connection.DeviceIdentity
 import com.connectit.android.connection.PeerConnection
 import com.connectit.android.connection.PendingSend
 import com.connectit.android.connection.ResumeStore
+import com.connectit.android.quicksend.ShareShortcuts
 import com.connectit.android.discovery.NsdDiscoveryManager
 import com.connectit.android.model.ConnectedPeer
 import com.connectit.android.model.ConnectionRequest
@@ -552,6 +553,20 @@ class ConnectItService : LifecycleService() {
         }
     }
 
+    /** 傳給指定的幾台(分享面板直接點了某台裝置時用),不看選取中的是哪台、也不看「同時傳給所有裝置」。 */
+    fun sendFilesTo(peerIds: Collection<String>, files: List<Triple<Uri, String, Long>>) {
+        if (files.isEmpty()) return
+        val title = if (files.size == 1) files[0].second else "${files.size} 個檔案"
+        peerIds.mapNotNull { peerConnections[it] }.forEach { peer ->
+            if (peer.isFileTransferActive) {
+                pushEvent("${peer.name} 正在傳輸中,請稍後再試。")
+            } else {
+                beginTransfer(peer, title, "等待對方接受...")
+                peer.sendFiles(files)
+            }
+        }
+    }
+
     fun sendFolder(folderName: String, entries: List<FolderEntry>) {
         for (peer in readyTargets()) {
             beginTransfer(peer, folderName, "等待對方接受...")
@@ -873,7 +888,7 @@ class ConnectItService : LifecycleService() {
             _pendingConnectionRequest.value = null
             clearConnectionRequestNotification()
             peerConnections[peer.peerId] = peer
-            _connectedPeers.update { it + ConnectedPeer(peer.peerId, peer.name, peer.address) }
+            _connectedPeers.update { it + ConnectedPeer(peer.peerId, peer.name, peer.address, peer.remoteDeviceId) }
             _selectedPeerId.value = peer.peerId
             refreshSelection()
             pushLog("已與 ${peer.name} (${peer.address}) 建立連線。")
@@ -940,6 +955,7 @@ class ConnectItService : LifecycleService() {
 
         connectionEngine.onFileTransferEnded = { peer, ended ->
             setTransfer(peer.peerId, null)
+            rememberShareTarget(peer, ended.direction, ended.reason)
             if (_peerTransfers.value.isEmpty()) clearIncomingTransferNotification()
             val message = formatFileEndedMessage(peer.name, ended)
             notifyTransferEnded(ended.reason, message)
@@ -952,6 +968,7 @@ class ConnectItService : LifecycleService() {
 
         connectionEngine.onFolderTransferEnded = { peer, ended ->
             setTransfer(peer.peerId, null)
+            rememberShareTarget(peer, ended.direction, ended.reason)
             if (_peerTransfers.value.isEmpty()) clearIncomingTransferNotification()
             val message = formatFolderEndedMessage(peer.name, ended)
             notifyTransferEnded(ended.reason, message)
@@ -965,6 +982,14 @@ class ConnectItService : LifecycleService() {
                 ),
             )
             pushEvent(message)
+        }
+    }
+
+    /** 成功傳送給有裝置識別碼的對象後,把它放進分享面板的 Direct Share(見 [ShareShortcuts])。 */
+    private fun rememberShareTarget(peer: PeerConnection, direction: TransferDirection, reason: TransferEndReason) {
+        val deviceId = peer.remoteDeviceId ?: return
+        if (direction == TransferDirection.SENDING && reason == TransferEndReason.COMPLETED) {
+            ShareShortcuts.push(applicationContext, deviceId, peer.name)
         }
     }
 

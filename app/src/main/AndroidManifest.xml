@@ -66,7 +66,23 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="*/*" />
             </intent-filter>
+            <!-- 分享面板的 Direct Share:最近傳過的裝置(見 quicksend/ShareShortcuts.kt)。 -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
+
+        <!-- 快速設定的「ConnectIt 傳送」磚:點了直接選檔案傳送(見 quicksend/QuickSendTileService.kt)。 -->
+        <service
+            android:name=".quicksend.QuickSendTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_notification"
+            android:label="@string/quick_send_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <service
             android:name=".service.ConnectItService"

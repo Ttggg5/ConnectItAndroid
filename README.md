@@ -56,6 +56,23 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
   觀看端用 AudioTrack 播放,緩衝超過 200ms 就丟掉新片段,聲音不會越拖越慢。系統限制:只擷取得到允許被擷取
   的聲音(媒體/遊戲),部分串流 App 為了版權保護會拒絕擷取。Android 9 以下不提供這個選項。
 
+## 協定第 2 版(多裝置、加密、續傳、遙控器、快速傳送)
+
+跟 Windows 端逐欄位對應,詳細說明見 Windows 端 README 的「協定第 2 版」:
+
+- **多裝置**:`ConnectionEngine` 只負責監聽與交握,每條連線是一個 `connection/PeerConnection.kt`;交握帶 `DeviceId`,
+  同一台裝置重新連線時取代舊連線。服務記住「選取中的那台」,畫面頂端的裝置切換列可以換;「同時傳給所有已連線的裝置」一次傳給全部。
+- **加密與配對碼**:`connection/DeviceIdentity.kt` 在 AndroidKeyStore 產生固定的 ECDSA P-256 金鑰(系統自動附上自簽憑證),
+  連線一律雙向 TLS;配對碼算法與 Windows 端相同(兩邊用同一組測試向量)。信任清單只存憑證指紋(`trusted_devices_v2`),
+  升級前的名稱清單需要重新配對。Android 接受端沒辦法先偷看第一個 byte,舊版的明文請求會讓 TLS 握手失敗後直接斷線
+  (舊版那邊看到的結果跟被拒絕一樣)。NSD TXT 帶 `v=2` 與 `id`,沒有 `v` 的裝置顯示「需要更新」。
+- **續傳**:`connection/ResumeStore.kt` 記住保留的部分檔案(MediaStore 項目在收完之前一直是 pending,其他 App 看不到),
+  `DownloadStorage.reopenForAppend` 用 `"wa"` 模式接著寫;傳送端用 `InputStream.skip` 跳到 `Offset`。重新連上之前沒傳完的裝置時跳出「要繼續傳送嗎?」。
+- **遙控器**:`screen/RemoteControlController.kt`;當受控端時用 `screen/MediaKeyDispatcher.kt`(AudioManager)送出媒體鍵與音量,
+  不需要無障礙服務(螢幕鏡像中對方按媒體鍵也走這裡)。當控制端時整個畫面切到遙控器,實體音量鍵會轉送給對方(見 `MainActivity.dispatchKeyEvent`)。
+- **快速傳送**:快速設定的「ConnectIt 傳送」磚(`quicksend/QuickSendTileService.kt`)直接開檔案選擇器;成功傳送過的裝置會用
+  sharing shortcuts 出現在系統分享面板最上排(`quicksend/ShareShortcuts.kt`,Android 10 以上),點了直接傳給那台(沒連線的話先連線)。
+
 ## 專案結構
 
 | 位置 | 說明 |

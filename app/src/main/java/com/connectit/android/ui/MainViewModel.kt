@@ -30,15 +30,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pendingShare = MutableStateFlow<List<Uri>>(emptyList())
     val pendingShare: StateFlow<List<Uri>> = _pendingShare.asStateFlow()
 
+    /** 從分享面板的 Direct Share 選了某台裝置時,那台的裝置識別碼(直接傳給它,不用再選)。 */
+    private val _pendingShareTargetDeviceId = MutableStateFlow<String?>(null)
+    val pendingShareTargetDeviceId: StateFlow<String?> = _pendingShareTargetDeviceId.asStateFlow()
+
     /** 這次程序存活期間是否已經詢問過通知權限,避免每次重組/旋轉螢幕都再問一次。 */
     var notificationPermissionRequested = false
 
-    fun setPendingShare(uris: List<Uri>) {
+    fun setPendingShare(uris: List<Uri>, targetDeviceId: String? = null) {
+        _pendingShareTargetDeviceId.value = targetDeviceId
         _pendingShare.value = uris
     }
 
     fun clearPendingShare() {
         _pendingShare.value = emptyList()
+        _pendingShareTargetDeviceId.value = null
     }
 
     private val connection = object : ServiceConnection {
