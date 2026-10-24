@@ -74,7 +74,10 @@ import com.connectit.android.service.ConnectItService
 import com.connectit.android.service.ConnectionUiState
 import com.connectit.android.ui.components.AdaptiveNavigationBreakpoint
 import com.connectit.android.ui.components.ConnectFailureDialog
+import com.connectit.android.screen.RemoteControlPhase
 import com.connectit.android.ui.components.ConnectionRequestDialog
+import com.connectit.android.ui.components.RemoteControlHost
+import com.connectit.android.ui.components.RemoteControlScreen
 import com.connectit.android.ui.components.ResumeOfferDialog
 import com.connectit.android.ui.components.GradientAvatar
 import com.connectit.android.ui.components.GradientButton
@@ -129,6 +132,7 @@ fun ConnectItApp(service: ConnectItService, viewModel: MainViewModel) {
     val connectFailure by service.connectFailure.collectAsState()
     val resumeOffer by service.resumeOffer.collectAsState()
     val screenMirrorState by service.screenMirror.state.collectAsState()
+    val remoteControlState by service.remoteControl.state.collectAsState()
     val pendingShare by viewModel.pendingShare.collectAsState()
     // 初始值 null 代表 DataStore 還沒讀出來:這段期間不要決定要不要顯示引導,避免閃一下。
     val settings by service.settingsRepository.settings.collectAsState(initial = null)
@@ -174,6 +178,13 @@ fun ConnectItApp(service: ConnectItService, viewModel: MainViewModel) {
     // 放在下面各種「整頁子畫面」的提早 return 之前:不論使用者在哪一頁(例如正在看影片),
     // 對方送來的螢幕鏡像請求都要跳出來。
     ScreenMirrorHost(service = service)
+    RemoteControlHost(service = service)
+
+    // 遙控對方時整個畫面都讓給遙控器,結束後自動回到原本的頁面。
+    if (remoteControlState.phase == RemoteControlPhase.CONTROLLING) {
+        RemoteControlScreen(service = service, state = remoteControlState)
+        return
+    }
 
     // 觀看對方螢幕時整個畫面都讓給它(全螢幕),結束後自動回到原本的頁面。
     (screenMirrorState as? ScreenMirrorState.Viewing)?.let { viewing ->

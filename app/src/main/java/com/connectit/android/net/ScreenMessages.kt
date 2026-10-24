@@ -85,6 +85,14 @@ data class ScreenMessage(
         const val INPUT = "screen-input"
         const val STOP = "screen-stop"
 
+        // 遙控器(不用開螢幕鏡像,只送按鍵,見 RemoteControlController),對應 Windows 端 ScreenMessage.Remote*:
+        // 控制端送 remote-request,受控端同意回 remote-accept(帶 Platform),不同意回 remote-reject;之後控制端用
+        // screen-input(key-down/key-up,SessionId 是遙控工作階段的)送按鍵,任一方送 remote-stop 結束。
+        const val REMOTE_REQUEST = "remote-request"
+        const val REMOTE_ACCEPT = "remote-accept"
+        const val REMOTE_REJECT = "remote-reject"
+        const val REMOTE_STOP = "remote-stop"
+
         fun parse(bytes: ByteArray): ScreenMessage? = runCatching {
             val obj = JSONObject(String(bytes, Charsets.UTF_8))
             ScreenMessage(
@@ -119,6 +127,22 @@ object ScreenInputAction {
     const val KEY_UP = "key-up"
     const val TEXT = "text"
     const val NAV = "nav"
+}
+
+/**
+ * 遙控器與螢幕鏡像快捷鍵列用到的按鍵名稱(網頁 KeyboardEvent.key 的標準命名),對應 Windows 端 RemoteKeys。
+ * Android 受控端只支援這些媒體鍵與音量(用 AudioManager 送出,不需要無障礙服務)。
+ */
+object RemoteKeys {
+    const val PLAY_PAUSE = "MediaPlayPause"
+    const val NEXT = "MediaTrackNext"
+    const val PREVIOUS = "MediaTrackPrevious"
+    const val STOP = "MediaStop"
+    const val VOLUME_UP = "AudioVolumeUp"
+    const val VOLUME_DOWN = "AudioVolumeDown"
+    const val VOLUME_MUTE = "AudioVolumeMute"
+
+    fun isMediaKey(key: String?): Boolean = key in setOf(PLAY_PAUSE, NEXT, PREVIOUS, STOP, VOLUME_UP, VOLUME_DOWN, VOLUME_MUTE)
 }
 
 object ScreenRejectReason {

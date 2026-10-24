@@ -84,6 +84,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.connectit.android.net.ScreenInputAction
+import com.connectit.android.net.RemoteKeys
+import com.connectit.android.ui.components.RemoteShortcuts
 import com.connectit.android.net.ScreenMessage
 import com.connectit.android.screen.ScreenMirrorState
 import com.connectit.android.service.ConnectItService
@@ -193,6 +195,12 @@ fun ScreenViewerScreen(
         send(ScreenInputAction.KEY_UP, key = key)
     }
 
+    /** 組合鍵:依序按下,再反過來依序放開(Ctrl+C、Alt+Tab…)。 */
+    fun pressShortcut(keys: List<String>) {
+        keys.forEach { send(ScreenInputAction.KEY_DOWN, key = it) }
+        keys.asReversed().forEach { send(ScreenInputAction.KEY_UP, key = it) }
+    }
+
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         var canvasSize by remember { mutableStateOf(IntSize.Zero) }
         val currentFrame = frame
@@ -298,9 +306,9 @@ fun ScreenViewerScreen(
                 Spacer(Modifier.weight(1f))
                 if (canControl) {
                     if (isRemoteAndroid) {
-                        AndroidNavBar(onNav = { send(ScreenInputAction.NAV, key = it) })
+                        AndroidNavBar(onNav = { send(ScreenInputAction.NAV, key = it) }, onShortcut = ::pressShortcut)
                     } else {
-                        DesktopKeyBar(onKey = ::pressKey)
+                        DesktopKeyBar(onKey = ::pressKey, onShortcut = ::pressShortcut)
                     }
                 }
             }
@@ -384,25 +392,45 @@ private fun ViewerTopBar(
 }
 
 @Composable
-private fun AndroidNavBar(onNav: (String) -> Unit) {
+private fun AndroidNavBar(onNav: (String) -> Unit, onShortcut: (List<String>) -> Unit) {
     Surface(color = Color.Black.copy(alpha = 0.55f), contentColor = Color.White, modifier = Modifier.fillMaxWidth()) {
-        Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-            IconButton(onClick = { onNav("back") }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回") }
-            IconButton(onClick = { onNav("home") }) { Icon(Icons.Filled.Circle, contentDescription = "主畫面") }
-            IconButton(onClick = { onNav("recents") }) { Icon(Icons.Filled.CropSquare, contentDescription = "最近使用") }
+        Column {
+            // 媒體鍵/音量:對方不用開無障礙服務也能用。
+            Row(Modifier.fillMaxWidth().padding(top = 2.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+                RemoteShortcuts.media.filter { it.keys.first() != RemoteKeys.STOP }.forEach { shortcut ->
+                    IconButton(onClick = { onShortcut(shortcut.keys) }) { Icon(shortcut.icon, contentDescription = shortcut.label) }
+                }
+            }
+            Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+                IconButton(onClick = { onNav("back") }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回") }
+                IconButton(onClick = { onNav("home") }) { Icon(Icons.Filled.Circle, contentDescription = "主畫面") }
+                IconButton(onClick = { onNav("recents") }) { Icon(Icons.Filled.CropSquare, contentDescription = "最近使用") }
+            }
         }
     }
 }
 
 @Composable
-private fun DesktopKeyBar(onKey: (String) -> Unit) {
+private fun DesktopKeyBar(onKey: (String) -> Unit, onShortcut: (List<String>) -> Unit) {
     val keys = listOf("Escape" to "Esc", "Tab" to "Tab", "ArrowLeft" to "←", "ArrowUp" to "↑", "ArrowDown" to "↓", "ArrowRight" to "→",
         "Backspace" to "⌫", "Delete" to "Del", "Enter" to "Enter")
     Surface(color = Color.Black.copy(alpha = 0.55f), contentColor = Color.White, modifier = Modifier.fillMaxWidth()) {
-        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.CallToAction, contentDescription = null, tint = Color.White.copy(alpha = 0.6f), modifier = Modifier.size(18.dp))
-            keys.forEach { (key, label) ->
-                TextButton(onClick = { onKey(key) }) { Text(label, color = Color.White) }
+        Column {
+            Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.CallToAction, contentDescription = null, tint = Color.White.copy(alpha = 0.6f), modifier = Modifier.size(18.dp))
+                keys.forEach { (key, label) ->
+                    TextButton(onClick = { onKey(key) }) { Text(label, color = Color.White) }
+                }
+            }
+            // 組合鍵(Ctrl+C、Alt+Tab、Win…)與媒體鍵:手機的鍵盤按不出來,做成按鈕。
+            Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                (RemoteShortcuts.system + RemoteShortcuts.media).forEach { shortcut ->
+                    TextButton(onClick = { onShortcut(shortcut.keys) }) {
+                        Icon(shortcut.icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(4.dp))
+                        Text(shortcut.label, color = Color.White)
+                    }
+                }
             }
         }
     }

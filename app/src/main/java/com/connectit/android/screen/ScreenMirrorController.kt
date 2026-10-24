@@ -6,6 +6,8 @@ import android.os.Build
 import android.os.SystemClock
 import com.connectit.android.connection.PeerConnection
 import com.connectit.android.net.MAX_FRAMES_IN_FLIGHT
+import com.connectit.android.net.RemoteKeys
+import com.connectit.android.net.ScreenInputAction
 import com.connectit.android.net.ScreenMessage
 import com.connectit.android.net.ScreenRejectReason
 import kotlinx.coroutines.CoroutineScope
@@ -121,6 +123,7 @@ class ScreenMirrorController(
     private var senderJob: Job? = null
     private var controlWatcherJob: Job? = null
     private val injector = ScreenInputInjector()
+    private val mediaKeys = MediaKeyDispatcher(context)
     @Volatile private var lastSentSeq = 0
     @Volatile private var lastAckedSeq = 0
     private val ackSignal = Channel<Unit>(Channel.CONFLATED)
@@ -387,7 +390,13 @@ class ScreenMirrorController(
         if (message.type == ScreenMessage.INPUT) {
             launchConfined {
                 val current = _state.value as? ScreenMirrorState.Sharing ?: return@launchConfined
-                if (current.sessionId == message.sessionId && current.controlActive) injector.handle(message)
+                if (current.sessionId != message.sessionId) return@launchConfined
+                // 媒體鍵/音量:只要允許操控就能用,不需要無障礙服務(用 AudioManager 送出)。
+                if (current.allowControl && RemoteKeys.isMediaKey(message.key)) {
+                    if (message.action == ScreenInputAction.KEY_DOWN) mediaKeys.dispatch(message.key)
+                } else if (current.controlActive) {
+                    injector.handle(message)
+                }
             }
             return
         }

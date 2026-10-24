@@ -45,6 +45,8 @@ import com.connectit.android.repo.AppSettings
 import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.repo.SettingsRepository
 import com.connectit.android.screen.ScreenMirrorController
+import com.connectit.android.screen.RemoteControlController
+import com.connectit.android.screen.RemoteControlPhase
 import com.connectit.android.screen.ScreenMirrorState
 import com.connectit.android.update.AppUpdater
 import com.connectit.android.util.DownloadStorage
@@ -152,6 +154,10 @@ class ConnectItService : LifecycleService() {
 
     /** 螢幕鏡像(分享/觀看/遠端操控),跑在配對連線上,見 [ScreenMirrorController]。 */
     lateinit var screenMirror: ScreenMirrorController
+        private set
+
+    /** 遙控器(不用開鏡像,只送媒體鍵/音量/簡報/快捷鍵),見 [RemoteControlController]。 */
+    lateinit var remoteControl: RemoteControlController
         private set
 
     /** 目前前景服務宣告的類型:分享螢幕期間要多帶 mediaProjection,onStartCommand 重貼通知時也要沿用。 */
@@ -305,8 +311,16 @@ class ConnectItService : LifecycleService() {
             onProjectionReleased = { setForegroundTypes(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) },
         )
 
+        remoteControl = RemoteControlController(
+            context = applicationContext,
+            scope = lifecycleScope,
+            onNotice = { pushEvent(it) },
+            isTrusted = { peer -> cachedSettings.trustedDevices.any { it.fingerprint.equals(peer.remoteFingerprint, ignoreCase = true) } },
+        )
+
         wireCallbacks()
         observeScreenMirror()
+        observeRemoteControl()
 
         deviceDiscovery.startDiscovery()
         videoDiscovery.startDiscovery()
@@ -549,6 +563,11 @@ class ConnectItService : LifecycleService() {
         selectedPeer?.cancelFileTransfer()
     }
 
+    /** 請求遙控選取中的那台(對方同意後畫面切到遙控器)。 */
+    fun requestRemoteControl() {
+        selectedPeer?.let { remoteControl.requestControl(it) }
+    }
+
     /** 請選取中的那台分享螢幕給我看。 */
     fun requestViewPeerScreen() {
         selectedPeer?.let { screenMirror.requestViewPeer(it) }
@@ -780,6 +799,20 @@ class ConnectItService : LifecycleService() {
         }
     }
 
+    /** 對方想遙控這台裝置時,App 在背景的話跳通知提醒使用者回來處理。 */
+    private fun observeRemoteControl() {
+        lifecycleScope.launch {
+            remoteControl.state.collect { state ->
+                val peerName = state.peer?.name ?: getString(R.string.notification_incoming_transfer_unknown_peer)
+                when (state.phase) {
+                    RemoteControlPhase.INCOMING_REQUEST -> notifyScreenMirrorRequest("$peerName 想要遙控這台裝置")
+                    RemoteControlPhase.CONTROLLED -> pushLog("$peerName 開始遙控這台裝置。")
+                    else -> Unit
+                }
+            }
+        }
+    }
+
     private fun notifyScreenMirrorRequest(title: String) {
         val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
             .setContentTitle(title)
@@ -817,7 +850,9 @@ class ConnectItService : LifecycleService() {
         videoHostServer.onStatusChanged = { pushLog(it) }
 
         connectionEngine.onStatusChanged = { pushLog(it) }
-        connectionEngine.onScreenMessage = { peer, message -> screenMirror.handleMessage(peer, message) }
+        connectionEngine.onScreenMessage = { peer, message ->
+            if (!remoteControl.handleMessage(peer, message)) screenMirror.handleMessage(peer, message)
+        }
         connectionEngine.onScreenFrame = { peer, payload -> screenMirror.handleFrame(peer, payload) }
         connectionEngine.onScreenAudio = { peer, pcm -> screenMirror.handleAudio(peer, pcm) }
 
@@ -854,6 +889,7 @@ class ConnectItService : LifecycleService() {
 
         connectionEngine.onPeerClosed = { peer, byRemote ->
             screenMirror.onConnectionClosed(peer)
+            remoteControl.onConnectionClosed(peer)
             peerConnections.remove(peer.peerId)
             transferRates.remove(peer.peerId)
             _connectedPeers.update { list -> list.filterNot { it.peerId == peer.peerId } }

@@ -33,7 +33,10 @@ import com.connectit.android.service.ConnectItService
 import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.repo.RecentlyWatched
 import com.connectit.android.ui.components.ConnectFailureDialog
+import com.connectit.android.screen.RemoteControlPhase
 import com.connectit.android.ui.components.ConnectionRequestDialog
+import com.connectit.android.ui.components.RemoteControlHost
+import com.connectit.android.ui.components.RemoteControlScreen
 import com.connectit.android.ui.components.ResumeOfferDialog
 import com.connectit.android.ui.components.GradientAvatar
 import com.connectit.android.ui.components.ScreenMirrorHost
@@ -81,6 +84,7 @@ fun TvAppRoot(service: ConnectItService) {
     val connectFailure by service.connectFailure.collectAsState()
     val resumeOffer by service.resumeOffer.collectAsState()
     val screenMirrorState by service.screenMirror.state.collectAsState()
+    val remoteControlState by service.remoteControl.state.collectAsState()
     val connectionState by service.connectionState.collectAsState()
     val settings by service.settingsRepository.settings.collectAsState(initial = null)
     val scope = rememberCoroutineScope()
@@ -110,6 +114,15 @@ fun TvAppRoot(service: ConnectItService) {
     // 不論在哪一頁都會跳出來。
     ConnectItTheme(themeMode = AppThemeMode.DARK) {
         ScreenMirrorHost(service = service)
+        RemoteControlHost(service = service)
+    }
+
+    // 遙控對方(用遙控器的方向鍵選按鈕、OK 送出):整個畫面讓給遙控器,按返回鍵結束。
+    if (remoteControlState.phase == RemoteControlPhase.CONTROLLING) {
+        ConnectItTheme(themeMode = AppThemeMode.DARK) {
+            RemoteControlScreen(service = service, state = remoteControlState)
+        }
+        return
     }
 
     // 觀看對方螢幕:TV 沒有觸控,只提供觀看(按返回鍵結束)。

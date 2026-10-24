@@ -68,6 +68,7 @@ import com.connectit.android.ui.components.GhostButton
 import com.connectit.android.ui.components.GradientAvatar
 import com.connectit.android.ui.components.GradientButton
 import com.connectit.android.ui.components.GradientProgressBar
+import com.connectit.android.ui.components.RemoteControlSection
 import com.connectit.android.ui.components.ScreenMirrorSection
 import com.connectit.android.ui.theme.BrandColors
 import com.connectit.android.util.SafUtils
@@ -195,6 +196,8 @@ fun ConnectionPanel(service: ConnectItService, peer: ConnectedPeer, modifier: Mo
 
         Spacer(Modifier.height(18.dp))
         ScreenMirrorSection(service = service)
+        Spacer(Modifier.height(10.dp))
+        RemoteControlSection(service = service)
 
         // 傳輸中
         transferState?.let { state ->

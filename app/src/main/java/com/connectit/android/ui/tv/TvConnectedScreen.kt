@@ -16,6 +16,8 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CastConnected
 import androidx.compose.material.icons.filled.ScreenShare
+import androidx.compose.material.icons.filled.SettingsRemote
+import com.connectit.android.screen.RemoteControlPhase
 import androidx.compose.material.icons.filled.StopScreenShare
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Devices
@@ -55,6 +57,7 @@ fun TvConnectionPanel(service: ConnectItService, peer: ConnectedPeer) {
     val transferState by service.transferState.collectAsState()
     val history by service.transferHistory.collectAsState()
     val screenMirrorState by service.screenMirror.state.collectAsState()
+    val remoteControlState by service.remoteControl.state.collectAsState()
     val connectedPeers by service.connectedPeers.collectAsState()
     val peerTransfers by service.peerTransfers.collectAsState()
     val sendToAll by service.sendToAll.collectAsState()
@@ -160,6 +163,14 @@ fun TvConnectionPanel(service: ConnectItService, peer: ConnectedPeer) {
                         Icon(Icons.Filled.ScreenShare, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
                         Text("分享我的螢幕")
+                    }
+                    OutlinedButton(onClick = { service.requestRemoteControl() }, enabled = remoteControlState.phase == RemoteControlPhase.IDLE) {
+                        Icon(Icons.Filled.SettingsRemote, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (remoteControlState.phase == RemoteControlPhase.CONTROLLED) "正在被遙控" else "遙控器")
+                    }
+                    if (remoteControlState.phase == RemoteControlPhase.CONTROLLED) {
+                        OutlinedButton(onClick = { service.remoteControl.stop() }) { Text("結束遙控") }
                     }
                 }
             }

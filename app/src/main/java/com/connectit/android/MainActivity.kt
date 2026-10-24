@@ -9,7 +9,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import android.view.KeyEvent
 import androidx.activity.viewModels
+import com.connectit.android.net.RemoteKeys
+import com.connectit.android.screen.RemoteControlPhase
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
@@ -150,6 +153,23 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         viewModel.bind()
+    }
+
+    /** 遙控對方時,實體音量鍵改成調整對方的音量(不調這台)。 */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val remote = viewModel.service.value?.remoteControl
+        if (remote != null && remote.state.value.phase == RemoteControlPhase.CONTROLLING) {
+            val key = when (event.keyCode) {
+                KeyEvent.KEYCODE_VOLUME_UP -> RemoteKeys.VOLUME_UP
+                KeyEvent.KEYCODE_VOLUME_DOWN -> RemoteKeys.VOLUME_DOWN
+                else -> null
+            }
+            if (key != null) {
+                if (event.action == KeyEvent.ACTION_DOWN) remote.sendShortcut(listOf(key))
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onStop() {
