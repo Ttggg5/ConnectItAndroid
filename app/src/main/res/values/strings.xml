@@ -10,6 +10,8 @@
     <string name="notification_connected_title">已與 %1$s 建立連線</string>
     <string name="notification_connection_request_title">%1$s 想要與你連線</string>
     <string name="notification_connection_request_text">開啟 ConnectIt 即可選擇接受或拒絕</string>
+    <string name="notification_update_available_title">ConnectIt %1$s 已推出</string>
+    <string name="notification_update_available_text">到「設定 → 軟體更新」即可安裝新版本</string>
     <string name="accessibility_service_label">ConnectIt 螢幕鏡像遠端操控</string>
     <string name="accessibility_service_description">分享螢幕給已連線的裝置、而且你勾選了「允許對方操控」時,讓對方可以在這台裝置上點擊、滑動、輸入文字與使用返回/主畫面。沒有在分享螢幕時不會做任何事,也不會讀取或記錄畫面內容。</string>
 </resources>

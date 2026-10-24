@@ -27,6 +27,9 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.InstallMobile
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FolderOpen
@@ -44,6 +47,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -71,11 +75,15 @@ import com.connectit.android.repo.AppSettings
 import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.repo.SettingsValidation
 import com.connectit.android.service.ConnectItService
+import com.connectit.android.update.UpdateState
+import com.connectit.android.update.statusText
 import com.connectit.android.ui.components.AdaptiveContentWidth
 import com.connectit.android.ui.components.AutoSaveNumberField
 import com.connectit.android.ui.components.AutoSaveTextField
 import com.connectit.android.ui.components.ClickRow
 import com.connectit.android.ui.components.GhostButton
+import com.connectit.android.ui.components.GradientButton
+import com.connectit.android.ui.components.SettingsButtonRow
 import com.connectit.android.ui.components.SettingsDivider
 import com.connectit.android.ui.components.SettingsGroup
 import com.connectit.android.ui.components.SettingsSubheader
@@ -398,6 +406,55 @@ fun SettingsScreen(
                             supportingText = "以逗號分隔;分享影片資料夾時,這些副檔名的檔案也會列入。",
                         )
                     }
+                }
+            }
+
+            // ===== 軟體更新 =====
+            val updateState by service.appUpdater.state.collectAsState()
+            SettingsGroup(
+                title = "軟體更新",
+                icon = Icons.Filled.SystemUpdate,
+                description = "目前版本:${service.appUpdater.currentVersionName}",
+            ) {
+                Text(
+                    updateState.statusText(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                (updateState as? UpdateState.Downloading)?.let { downloading ->
+                    val progress = downloading.progress
+                    if (progress != null) {
+                        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+                    }
+                }
+                SettingsButtonRow {
+                    when (val state = updateState) {
+                        is UpdateState.Available -> GradientButton(
+                            onClick = { service.appUpdater.startDownload(state.release) },
+                            text = "下載並更新",
+                            icon = Icons.Filled.Download,
+                        )
+                        is UpdateState.ReadyToInstall -> GradientButton(
+                            onClick = { service.appUpdater.install(state.apk) },
+                            text = "安裝",
+                            icon = Icons.Filled.InstallMobile,
+                        )
+                        is UpdateState.Failed -> state.release?.let { release ->
+                            GradientButton(
+                                onClick = { service.appUpdater.startDownload(release) },
+                                text = "重試",
+                                icon = Icons.Filled.Download,
+                            )
+                        }
+                        else -> Unit
+                    }
+                    GhostButton(
+                        onClick = { service.appUpdater.requestCheck() },
+                        text = "檢查更新",
+                        enabled = updateState !is UpdateState.Checking && updateState !is UpdateState.Downloading,
+                    )
                 }
             }
 

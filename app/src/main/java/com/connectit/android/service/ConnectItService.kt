@@ -42,6 +42,7 @@ import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.repo.SettingsRepository
 import com.connectit.android.screen.ScreenMirrorController
 import com.connectit.android.screen.ScreenMirrorState
+import com.connectit.android.update.AppUpdater
 import com.connectit.android.util.DownloadStorage
 import com.connectit.android.util.NetworkUtils
 import com.connectit.android.util.TransferRateTracker
@@ -127,6 +128,10 @@ class ConnectItService : LifecycleService() {
     private val binder = LocalBinder()
 
     lateinit var settingsRepository: SettingsRepository
+        private set
+
+    /** 自我更新(設定頁的「軟體更新」);服務啟動後會自動檢查一次。 */
+    lateinit var appUpdater: AppUpdater
         private set
 
     private lateinit var connectionEngine: ConnectionEngine
@@ -242,6 +247,7 @@ class ConnectItService : LifecycleService() {
         )
 
         settingsRepository = SettingsRepository(applicationContext)
+        appUpdater = AppUpdater(applicationContext, lifecycleScope)
 
         val nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
         deviceDiscovery = NsdDiscoveryManager(nsdManager, NsdDiscoveryManager.DEVICE_SERVICE_TYPE)
@@ -278,6 +284,15 @@ class ConnectItService : LifecycleService() {
             val port = connectionEngine.startListening(preferredPort)
             settingsRepository.settings.map { it.deviceName }.distinctUntilChanged().collect { name ->
                 deviceDiscovery.advertise(name, port)
+            }
+        }
+
+        // 啟動後等一下再檢查更新,不跟裝置探索/監聽搶開機時的網路。
+        lifecycleScope.launch {
+            delay(STARTUP_UPDATE_CHECK_DELAY_MS)
+            appUpdater.check()?.let { release ->
+                pushLog("發現新版本 ${release.versionName}。")
+                notifyUpdateAvailable(release.versionName)
             }
         }
     }
@@ -1008,6 +1023,20 @@ class ConnectItService : LifecycleService() {
         postAlertNotification(CONNECTION_REQUEST_NOTIFICATION_ID, notification)
     }
 
+    private fun notifyUpdateAvailable(versionName: String) {
+        if (!cachedSettings.notificationsEnabled) return
+        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setContentTitle(getString(R.string.notification_update_available_title, versionName))
+            .setContentText(getString(R.string.notification_update_available_text))
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(mainActivityIntent())
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
+            .build()
+
+        postAlertNotification(UPDATE_AVAILABLE_NOTIFICATION_ID, notification)
+    }
+
     private fun clearConnectionRequestNotification() {
         NotificationManagerCompat.from(this).cancel(CONNECTION_REQUEST_NOTIFICATION_ID)
     }
@@ -1030,5 +1059,7 @@ class ConnectItService : LifecycleService() {
         private const val TRANSFER_PROGRESS_NOTIFICATION_ID = 6
         private const val PROGRESS_NOTIFICATION_INTERVAL_MS = 500L
         private const val SCREEN_MIRROR_NOTIFICATION_ID = 7
+        private const val UPDATE_AVAILABLE_NOTIFICATION_ID = 8
+        private const val STARTUP_UPDATE_CHECK_DELAY_MS = 8_000L
     }
 }

@@ -16,6 +16,8 @@
     <!-- 只有 API 28(Android 9)以下的裝置需要:寫入公用 Download 資料夾。API 29 起改用
          MediaStore.Downloads,不需要這個權限。 -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <!-- 自我更新:下載 GitHub Release 的新版 APK 後交給系統安裝程式(見 update/AppUpdater.kt)。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- 同一個 APK 手機、平板、Android TV 共用:兩個 feature 都設 required="false",
          裝置沒有觸控螢幕(TV)或沒有 leanback(手機/平板)都不會被 Play 商店擋掉安裝。 -->
@@ -86,6 +88,16 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_file_paths" />
+        </provider>
 
     </application>
 

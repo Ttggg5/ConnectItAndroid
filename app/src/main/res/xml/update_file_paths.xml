@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 自我更新下載的 APK(見 update/AppUpdater.kt)透過 FileProvider 交給系統安裝程式,只開放這個資料夾。 -->
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>

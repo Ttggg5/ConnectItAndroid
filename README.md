@@ -120,6 +120,14 @@ Windows 版 ConnectIt 的 Android 對應端:用標準 **mDNS/DNS-SD**(`NsdManage
   中即時生效。遙控畫面的排序/隨機播放/自動播放下一部也以這些值為初始值,但在遙控畫面上的調整
   只影響當次分享,不會寫回設定。
 
+## 自我更新
+
+CI 在 `master` 每次建置(而且有設定 `RELEASE_KEYSTORE_*` secrets 時)會發佈 GitHub Release `v1.0.{建置編號}`,
+附上 release APK(`ConnectIt.apk`);tag 最後一段就是 `versionCode`。App 啟動約 8 秒後自動檢查
+`releases/latest`,有新版本就發通知,到「設定 → 軟體更新」按「下載並更新」會下載 APK(有 GitHub 提供的
+SHA-256 摘要時會驗證)並開啟系統安裝畫面(`update/AppUpdater.kt`)。Android 不允許 App 靜默安裝,
+第一次需要允許「安裝不明應用程式」,且新舊 APK 必須用同一把金鑰簽章才能覆蓋安裝。
+
 ## 建置與執行
 
 需要 Android Studio(或指令列的 Android SDK + JDK 17)。

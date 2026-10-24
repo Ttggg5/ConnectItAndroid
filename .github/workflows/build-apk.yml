@@ -8,6 +8,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 發佈 GitHub Release 需要寫入權限(App 的自我更新從 Release 下載新版 APK)。
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -51,3 +54,20 @@ jobs:
         with:
           name: ConnectIt-release-apk
           path: app/build/outputs/apk/release/*.apk
+
+      # 只有 master 而且有固定簽章金鑰時才發佈 Release:App 內的自我更新(update/AppUpdater.kt)會下載
+      # 這個 APK 覆蓋安裝,簽章跟已安裝的版本不同的話系統會拒絕更新。tag 最後一段 = versionCode。
+      - name: Prepare release APK
+        if: github.ref == 'refs/heads/master' && env.RELEASE_KEYSTORE_PATH != ''
+        run: cp app/build/outputs/apk/release/*.apk ConnectIt.apk
+
+      - name: Create GitHub Release
+        if: github.ref == 'refs/heads/master' && env.RELEASE_KEYSTORE_PATH != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: ConnectIt 1.0.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          body: ${{ github.event.head_commit.message }}
+          files: ConnectIt.apk
+          make_latest: true

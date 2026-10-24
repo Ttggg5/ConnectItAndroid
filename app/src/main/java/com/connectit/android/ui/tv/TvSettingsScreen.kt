@@ -42,6 +42,8 @@ import androidx.tv.material3.Text
 import com.connectit.android.repo.AppSettings
 import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.service.ConnectItService
+import com.connectit.android.update.UpdateState
+import com.connectit.android.update.statusText
 import com.connectit.android.video.VideoServerPlaybackOptions
 import com.connectit.android.video.VideoSort
 import kotlinx.coroutines.launch
@@ -221,6 +223,27 @@ fun TvSettingsScreen(service: ConnectItService) {
                         onClick = { scope.launch { service.settingsRepository.setVideoDefaultSpeed(speedOption) } },
                     )
                 }
+            }
+        }
+
+        SettingsSection(title = "軟體更新") {
+            val updater = service.appUpdater
+            val updateState by updater.state.collectAsState()
+            Text("目前版本:${updater.currentVersionName}", style = MaterialTheme.typography.bodySmall)
+            Text(updateState.statusText())
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                when (val state = updateState) {
+                    is UpdateState.Available -> Button(onClick = { updater.startDownload(state.release) }) { Text("下載並更新") }
+                    is UpdateState.ReadyToInstall -> Button(onClick = { updater.install(state.apk) }) { Text("安裝") }
+                    is UpdateState.Failed -> state.release?.let { release ->
+                        Button(onClick = { updater.startDownload(release) }) { Text("重試") }
+                    }
+                    else -> Unit
+                }
+                OutlinedButton(
+                    onClick = { updater.requestCheck() },
+                    enabled = updateState !is UpdateState.Checking && updateState !is UpdateState.Downloading,
+                ) { Text("檢查更新") }
             }
         }
 
