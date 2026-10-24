@@ -28,6 +28,8 @@ import com.connectit.android.R
 import com.connectit.android.connection.ConnectionEngine
 import com.connectit.android.connection.DeviceIdentity
 import com.connectit.android.connection.PeerConnection
+import com.connectit.android.connection.PendingSend
+import com.connectit.android.connection.ResumeStore
 import com.connectit.android.discovery.NsdDiscoveryManager
 import com.connectit.android.model.ConnectedPeer
 import com.connectit.android.model.ConnectionRequest
@@ -88,6 +90,9 @@ sealed interface VideoHostUiState {
     /** [url] 給其他裝置用瀏覽器觀看的網址(區網 IP + 連接埠),找不到區網 IP 時為 null。 */
     data class Running(val port: Int, val videoCount: Int, val folderName: String, val url: String? = null) : VideoHostUiState
 }
+
+/** 重新連上之前沒傳完的裝置:詢問要不要繼續傳送 [pending]。 */
+data class ResumeOffer(val peerId: String, val peerName: String, val pending: PendingSend)
 
 /** 主動連線失敗(被拒絕/沒回應/連不到),供畫面顯示對應原因與建議的說明對話框。 */
 data class ConnectFailure(val deviceName: String, val outcome: ConnectionRequestOutcome)
@@ -208,6 +213,11 @@ class ConnectItService : LifecycleService() {
     private val completedTransfers = MutableStateFlow<Map<String, TransferRecord>>(emptyMap())
     private val transferRates = ConcurrentHashMap<String, TransferRateTracker>()
 
+    /** 傳送到一半連線就斷了:以對方的 DeviceId 記住還沒送完的內容,同一台裝置重新連線時詢問要不要繼續。 */
+    private val pendingResends = ConcurrentHashMap<String, PendingSend>()
+    private val _resumeOffer = MutableStateFlow<ResumeOffer?>(null)
+    val resumeOffer: StateFlow<ResumeOffer?> = _resumeOffer.asStateFlow()
+
     private val _sendToAll = MutableStateFlow(false)
     /** 「同時傳給所有已連線的裝置」:只有連線兩台以上時才有意義。 */
     val sendToAll: StateFlow<Boolean> = _sendToAll.asStateFlow()
@@ -285,6 +295,9 @@ class ConnectItService : LifecycleService() {
         videoHostServer = VideoHostServer(applicationContext, playbackControlState)
         connectionEngine = ConnectionEngine(applicationContext, lifecycleScope)
         connectionEngine.customDownloadFolderProvider = { cachedSettings.customDownloadFolderUri?.let(Uri::parse) }
+        val resumeStore = ResumeStore.forContext(applicationContext)
+        connectionEngine.resumeStore = resumeStore
+        lifecycleScope.launch(Dispatchers.IO) { resumeStore.purgeExpired(contentResolver) }
         screenMirror = ScreenMirrorController(
             context = applicationContext,
             scope = lifecycleScope,
@@ -418,6 +431,20 @@ class ConnectItService : LifecycleService() {
 
     fun setSendToAll(enabled: Boolean) {
         _sendToAll.value = enabled
+    }
+
+    /** 「要繼續傳送嗎?」對話框的回應;對方保留了部分檔案的話會從中斷處接著傳。 */
+    fun respondToResumeOffer(resume: Boolean) {
+        val offer = _resumeOffer.value ?: return
+        _resumeOffer.value = null
+        if (!resume) return
+        val peer = peerConnections[offer.peerId]
+        if (peer == null || peer.isFileTransferActive) {
+            pushEvent("目前沒辦法繼續傳送,請稍後再試。")
+            return
+        }
+        beginTransfer(peer, offer.pending.displayName, "等待對方接受...")
+        peer.resumeSend(offer.pending)
     }
 
     /** 選取中的那台裝置。 */
@@ -816,6 +843,13 @@ class ConnectItService : LifecycleService() {
             refreshSelection()
             pushLog("已與 ${peer.name} (${peer.address}) 建立連線。")
             notifyConnected(peer.name)
+            peer.remoteDeviceId?.let { pendingResends.remove(it) }?.let { pending ->
+                _resumeOffer.value = ResumeOffer(peer.peerId, peer.name, pending)
+            }
+        }
+
+        connectionEngine.onTransferInterrupted = { peer, pending ->
+            peer.remoteDeviceId?.let { pendingResends[it] = pending }
         }
 
         connectionEngine.onPeerClosed = { peer, byRemote ->
@@ -826,6 +860,7 @@ class ConnectItService : LifecycleService() {
             _peerTransfers.update { it - peer.peerId }
             completedTransfers.update { it - peer.peerId }
             if (_peerTransfers.value.isEmpty()) clearIncomingTransferNotification()
+            if (_resumeOffer.value?.peerId == peer.peerId) _resumeOffer.value = null
             refreshSelection()
             if (byRemote) {
                 pushEvent("${peer.name} 已中斷連線。")
@@ -925,7 +960,12 @@ class ConnectItService : LifecycleService() {
         TransferEndReason.REJECTED -> "$peerName 拒絕接收「${e.fileName}」。"
         TransferEndReason.CANCELLED -> "已取消「${e.fileName}」的傳輸。"
         TransferEndReason.CANCELLED_BY_REMOTE -> "$peerName 取消了「${e.fileName}」的傳輸。"
-        TransferEndReason.CONNECTION_CLOSED -> "與 $peerName 的連線已中斷,「${e.fileName}」的傳輸已中止。"
+        TransferEndReason.CONNECTION_CLOSED -> when {
+            e.resumable && e.direction == TransferDirection.RECEIVING ->
+                "與 $peerName 的連線中斷了,「${e.fileName}」已保留收到的部分,重新連線後會從中斷處繼續。"
+            e.resumable -> "與 $peerName 的連線中斷了,重新連線後可以繼續傳送「${e.fileName}」。"
+            else -> "與 $peerName 的連線已中斷,「${e.fileName}」的傳輸已中止。"
+        }
         TransferEndReason.FAILED -> "「${e.fileName}」傳輸失敗。"
     }
 
@@ -939,7 +979,11 @@ class ConnectItService : LifecycleService() {
             TransferEndReason.REJECTED -> "$peerName 拒絕接收這些檔案。"
             TransferEndReason.CANCELLED -> "已取消傳輸(已完成 ${e.entryCount} 個檔案)。"
             TransferEndReason.CANCELLED_BY_REMOTE -> "$peerName 取消了傳輸(已完成 ${e.entryCount} 個檔案)。"
-            TransferEndReason.CONNECTION_CLOSED -> "與 $peerName 的連線已中斷,傳輸已中止(已完成 ${e.entryCount} 個檔案)。"
+            TransferEndReason.CONNECTION_CLOSED -> if (e.resumable) {
+                "與 $peerName 的連線中斷了(已完成 ${e.entryCount} 個檔案),重新連線後可以繼續。"
+            } else {
+                "與 $peerName 的連線已中斷,傳輸已中止(已完成 ${e.entryCount} 個檔案)。"
+            }
             TransferEndReason.FAILED -> "傳輸失敗(已完成 ${e.entryCount} 個檔案)。"
         }
     } else {
@@ -952,7 +996,11 @@ class ConnectItService : LifecycleService() {
             TransferEndReason.REJECTED -> "$peerName 拒絕接收資料夾「${e.folderName}」。"
             TransferEndReason.CANCELLED -> "已取消資料夾「${e.folderName}」的傳輸(已完成 ${e.entryCount} 個檔案)。"
             TransferEndReason.CANCELLED_BY_REMOTE -> "$peerName 取消了資料夾「${e.folderName}」的傳輸(已完成 ${e.entryCount} 個檔案)。"
-            TransferEndReason.CONNECTION_CLOSED -> "與 $peerName 的連線已中斷,資料夾「${e.folderName}」的傳輸已中止(已完成 ${e.entryCount} 個檔案)。"
+            TransferEndReason.CONNECTION_CLOSED -> if (e.resumable) {
+                "與 $peerName 的連線中斷了,資料夾「${e.folderName}」已完成 ${e.entryCount} 個檔案,重新連線後可以繼續。"
+            } else {
+                "與 $peerName 的連線已中斷,資料夾「${e.folderName}」的傳輸已中止(已完成 ${e.entryCount} 個檔案)。"
+            }
             TransferEndReason.FAILED -> "資料夾「${e.folderName}」傳輸失敗(已完成 ${e.entryCount} 個檔案)。"
         }
     }

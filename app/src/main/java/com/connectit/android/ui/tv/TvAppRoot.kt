@@ -34,6 +34,7 @@ import com.connectit.android.repo.AppThemeMode
 import com.connectit.android.repo.RecentlyWatched
 import com.connectit.android.ui.components.ConnectFailureDialog
 import com.connectit.android.ui.components.ConnectionRequestDialog
+import com.connectit.android.ui.components.ResumeOfferDialog
 import com.connectit.android.ui.components.GradientAvatar
 import com.connectit.android.ui.components.ScreenMirrorHost
 import com.connectit.android.ui.screens.ScreenViewerScreen
@@ -78,6 +79,7 @@ fun TvAppRoot(service: ConnectItService) {
     val connectingTo by service.connectingTo.collectAsState()
     val connectingPairingCode by service.connectingPairingCode.collectAsState()
     val connectFailure by service.connectFailure.collectAsState()
+    val resumeOffer by service.resumeOffer.collectAsState()
     val screenMirrorState by service.screenMirror.state.collectAsState()
     val connectionState by service.connectionState.collectAsState()
     val settings by service.settingsRepository.settings.collectAsState(initial = null)
@@ -206,6 +208,9 @@ fun TvAppRoot(service: ConnectItService) {
         }
         connectFailure?.let { failure ->
             ConnectFailureDialog(failure = failure, onDismiss = { service.dismissConnectFailure() })
+        }
+        resumeOffer?.let { offer ->
+            ResumeOfferDialog(peerName = offer.peerName, itemName = offer.pending.displayName, onRespond = { service.respondToResumeOffer(it) })
         }
     }
 }

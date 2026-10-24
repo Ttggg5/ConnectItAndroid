@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.HourglassEmpty
@@ -150,6 +151,28 @@ fun ConnectFailureDialog(failure: ConnectFailure, onDismiss: () -> Unit) {
         )
         Spacer(Modifier.height(22.dp))
         GradientButton(onClick = onDismiss, text = "知道了", modifier = Modifier.fillMaxWidth())
+    }
+}
+
+/** 重新連上之前沒傳完的裝置時詢問:要不要繼續傳送(對方保留了已收到的部分,會從中斷處接著傳)。 */
+@Composable
+fun ResumeOfferDialog(peerName: String, itemName: String, onRespond: (resume: Boolean) -> Unit) {
+    BrandDialog(onDismissRequest = { onRespond(false) }) {
+        IconTile(icon = Icons.Filled.Restore, size = 56.dp)
+        Spacer(Modifier.height(16.dp))
+        Text("要繼續傳送「$itemName」給 $peerName 嗎?", style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "上次連線中斷時還沒傳完。對方保留了已收到的部分,會從中斷的地方接著傳。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(22.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+            GhostButton(onClick = { onRespond(false) }, text = "不用了", modifier = Modifier.weight(1f))
+            GradientButton(onClick = { onRespond(true) }, text = "繼續傳送", modifier = Modifier.weight(1f))
+        }
     }
 }
 

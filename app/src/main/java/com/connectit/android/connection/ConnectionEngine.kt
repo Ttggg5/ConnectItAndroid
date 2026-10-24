@@ -66,6 +66,12 @@ class ConnectionEngine(
     /** 這台裝置的 TLS 身分,開始監聽前由服務設定(見 [DeviceIdentity.loadOrCreate])。 */
     @Volatile var identity: DeviceIdentity? = null
 
+    /** 接收端的續傳紀錄(見 [ResumeStore]);沒有設定時不支援續傳。 */
+    @Volatile var resumeStore: ResumeStore? = null
+
+    /** 傳送中連線就斷了(見 [PeerConnection.onTransferInterrupted])。 */
+    var onTransferInterrupted: ((PeerConnection, PendingSend) -> Unit)? = null
+
     var onConnectionRequested: ((ConnectionRequest) -> Unit)? = null
     var onConnected: ((PeerConnection) -> Unit)? = null
 
@@ -317,6 +323,8 @@ class ConnectionEngine(
         peer.onScreenMessage = { onScreenMessage?.invoke(peer, it) }
         peer.onScreenFrame = { onScreenFrame?.invoke(peer, it) }
         peer.onScreenAudio = { onScreenAudio?.invoke(peer, it) }
+        peer.onTransferInterrupted = { onTransferInterrupted?.invoke(peer, it) }
+        peer.resumeStore = resumeStore
         peer.onClosed = { byRemote ->
             _peers.remove(peer)
             onPeerClosed?.invoke(peer, byRemote)

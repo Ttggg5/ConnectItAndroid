@@ -72,6 +72,32 @@ object DownloadStorage {
         runCatching { resolver.update(token, values, null, null) }
     }
 
+    /** 續傳紀錄要把 [ReceivedFile.token] 存起來:Uri 存成字串,舊裝置的 File 存成「path:絕對路徑」。 */
+    fun tokenToString(token: Any): String = when (token) {
+        is File -> "path:${token.absolutePath}"
+        else -> token.toString()
+    }
+
+    fun tokenFromString(value: String): Any =
+        if (value.startsWith("path:")) File(value.removePrefix("path:")) else Uri.parse(value)
+
+    /**
+     * 續傳:重新打開上次保留的部分檔案,從結尾接著寫。回傳 (檔案, 已經有的位元組數);檔案不見了或打不開回傳 null。
+     * MediaStore 的項目在收完之前一直是 pending(其他 App 看不到),所以保留下來的部分檔案不會被誤用。
+     */
+    fun reopenForAppend(context: Context, token: Any, displayPath: String): Pair<ReceivedFile, Long>? = runCatching {
+        when (token) {
+            is File -> if (token.exists()) ReceivedFile(FileOutputStream(token, true), token, displayPath) to token.length() else null
+            is Uri -> {
+                val resolver = context.contentResolver
+                val size = resolver.openFileDescriptor(token, "r")?.use { it.statSize } ?: return@runCatching null
+                val stream = resolver.openOutputStream(token, "wa") ?: return@runCatching null
+                ReceivedFile(stream, token, displayPath) to size
+            }
+            else -> null
+        }
+    }.getOrNull()
+
     /** 傳輸失敗/取消時,刪掉還沒寫完的檔案。 */
     fun delete(resolver: ContentResolver, token: Any) {
         when (token) {

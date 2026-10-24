@@ -75,6 +75,7 @@ import com.connectit.android.service.ConnectionUiState
 import com.connectit.android.ui.components.AdaptiveNavigationBreakpoint
 import com.connectit.android.ui.components.ConnectFailureDialog
 import com.connectit.android.ui.components.ConnectionRequestDialog
+import com.connectit.android.ui.components.ResumeOfferDialog
 import com.connectit.android.ui.components.GradientAvatar
 import com.connectit.android.ui.components.GradientButton
 import com.connectit.android.ui.components.RadarPulse
@@ -126,6 +127,7 @@ fun ConnectItApp(service: ConnectItService, viewModel: MainViewModel) {
     val connectingTo by service.connectingTo.collectAsState()
     val connectingPairingCode by service.connectingPairingCode.collectAsState()
     val connectFailure by service.connectFailure.collectAsState()
+    val resumeOffer by service.resumeOffer.collectAsState()
     val screenMirrorState by service.screenMirror.state.collectAsState()
     val pendingShare by viewModel.pendingShare.collectAsState()
     // 初始值 null 代表 DataStore 還沒讀出來:這段期間不要決定要不要顯示引導,避免閃一下。
@@ -316,6 +318,9 @@ fun ConnectItApp(service: ConnectItService, viewModel: MainViewModel) {
 
     connectFailure?.let { failure ->
         ConnectFailureDialog(failure = failure, onDismiss = { service.dismissConnectFailure() })
+    }
+    resumeOffer?.let { offer ->
+        ResumeOfferDialog(peerName = offer.peerName, itemName = offer.pending.displayName, onRespond = { service.respondToResumeOffer(it) })
     }
 
     if (pendingShare.isNotEmpty() && currentSettings != null) {

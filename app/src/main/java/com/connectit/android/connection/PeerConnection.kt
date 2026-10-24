@@ -84,6 +84,15 @@ class PeerConnection internal constructor(
     /** 連線結束(對方斷線、心跳逾時,或本機呼叫 [disconnect]),參數為 true 代表不是本機主動中斷的。 */
     var onClosed: ((Boolean) -> Unit)? = null
 
+    /** 傳送中連線就斷了:還沒送完的內容(在 [onClosed] 之前呼叫),之後可以用 [resumeSend] 繼續。 */
+    var onTransferInterrupted: ((PendingSend) -> Unit)? = null
+
+    /** 接收端的續傳紀錄(見 [ResumeStore]);沒有設定時不支援續傳。 */
+    internal var resumeStore: ResumeStore? = null
+
+    /** 續傳紀錄只對認得出是哪台裝置(有 DeviceId)的連線有意義。 */
+    private val canResume: Boolean get() = resumeStore != null && remoteDeviceId != null
+
     private val closed = AtomicBoolean(false)
     val isClosed: Boolean get() = closed.get()
 
@@ -149,6 +158,8 @@ class PeerConnection internal constructor(
             }
 
             heartbeatJob?.cancel()
+            // 傳送中斷掉的話,先記下還沒送完的內容,讓同一台裝置重新連線後可以繼續。
+            buildPendingSend()?.let { onTransferInterrupted?.invoke(it) }
             abortActiveTransfer(TransferEndReason.CONNECTION_CLOSED)
             abortActiveFolderSession(TransferEndReason.CONNECTION_CLOSED)
 
@@ -261,11 +272,16 @@ class PeerConnection internal constructor(
             fileName = fileName,
             totalBytes = size,
             sourceUri = uri,
+            resumeKey = ResumeKeys.forFile(contentResolver, uri, size),
         )
         activeTransfer = transfer
 
         onStatusChanged?.invoke("已送出檔案「$fileName」的傳送請求,等待對方確認...")
-        launchWrite(FileControlMessage(type = "file-offer", transferId = transfer.transferId, fileName = fileName, size = size))
+        launchWrite(
+            FileControlMessage(
+                type = "file-offer", transferId = transfer.transferId, fileName = fileName, size = size, resumeKey = transfer.resumeKey,
+            )
+        )
     }
 
     /** 多個各自獨立的檔案,不建立子資料夾;只有一個檔案時直接走 [sendFile]。 */
@@ -309,7 +325,8 @@ class PeerConnection internal constructor(
         )
     }
 
-    fun sendFolder(folderName: String, entries: List<FolderEntry>) {
+    /** [resumeKey]:續傳時沿用第一次送出時的資料夾 ResumeKey(這次只送剩下的檔案,不能重新算)。 */
+    fun sendFolder(folderName: String, entries: List<FolderEntry>, resumeKey: String? = null) {
         if (isClosed) {
             onStatusChanged?.invoke("連線已中斷,無法傳送資料夾。")
             return
@@ -331,6 +348,7 @@ class PeerConnection internal constructor(
             totalEntries = entries.size,
             isBatch = false,
             pendingFiles = ArrayDeque(entries),
+            resumeKey = resumeKey ?: ResumeKeys.forFolder(folderName, entries),
         )
         activeFolderSession = session
 
@@ -342,6 +360,7 @@ class PeerConnection internal constructor(
                 fileName = session.folderName,
                 size = session.totalBytes,
                 totalEntries = session.totalEntries,
+                resumeKey = session.resumeKey,
             )
         )
     }
@@ -352,6 +371,13 @@ class PeerConnection internal constructor(
                 val input = transfer.sourceUri?.let { contentResolver.openInputStream(it) }
                     ?: throw java.io.IOException("無法開啟檔案")
                 input.use { stream ->
+                    // 續傳:對方已經有前面這些內容(見 handleFileAccept 的 offset)。
+                    var toSkip = transfer.transferredBytes
+                    while (toSkip > 0) {
+                        val skipped = stream.skip(toSkip)
+                        if (skipped <= 0) throw java.io.IOException("無法跳到續傳的位置")
+                        toSkip -= skipped
+                    }
                     // 讀取檔案(生產者)跟寫入 socket(消費者)用有界 channel 重疊執行,而不是
                     // 完全循序的「讀一塊→寫一塊」——這樣寫入目前這塊的同時就能開始讀下一塊,
                     // 內容提供者較慢(例如雲端同步的檔案)時能明顯縮短整體傳輸時間。
@@ -431,6 +457,8 @@ class PeerConnection internal constructor(
             sourceUri = next.uri,
             folderTransferId = session.folderTransferId,
             entryIndex = entryIndex,
+            resumeKey = ResumeKeys.forFile(contentResolver, next.uri, next.size),
+            folderEntry = next,
         )
         activeTransfer = transfer
 
@@ -444,6 +472,7 @@ class PeerConnection internal constructor(
                 relativePath = next.relativePath,
                 entryIndex = entryIndex,
                 totalEntries = session.totalEntries,
+                resumeKey = transfer.resumeKey,
             )
         )
     }
@@ -461,7 +490,7 @@ class PeerConnection internal constructor(
             return
         }
 
-        val received = DownloadStorage.createFile(context, "", transfer.fileName, customDownloadFolderProvider())
+        val received = tryResumeReceive(transfer) ?: DownloadStorage.createFile(context, "", transfer.fileName, customDownloadFolderProvider())
         if (received == null) {
             activeTransfer = null
             launchWrite(FileControlMessage(type = "file-reject", transferId = transferId))
@@ -564,6 +593,7 @@ class PeerConnection internal constructor(
             direction = TransferDirection.RECEIVING,
             fileName = sanitizeFileName(message.fileName),
             totalBytes = message.size,
+            resumeKey = message.resumeKey,
         )
         activeTransfer = transfer
 
@@ -616,14 +646,6 @@ class PeerConnection internal constructor(
             else -> "$baseSubDir/$subDir"
         }
 
-        val received = DownloadStorage.createFile(context, combinedSubDir, fileName, customDownloadFolderProvider())
-        if (received == null) {
-            onStatusChanged?.invoke("無法建立檔案。")
-            writeControl(FileControlMessage(type = "folder-cancel", transferId = session.folderTransferId))
-            abortActiveFolderSession(TransferEndReason.FAILED)
-            return
-        }
-
         val transfer = ActiveTransferState(
             transferId = message.transferId!!,
             direction = TransferDirection.RECEIVING,
@@ -631,7 +653,16 @@ class PeerConnection internal constructor(
             totalBytes = message.size,
             folderTransferId = session.folderTransferId,
             entryIndex = message.entryIndex,
+            resumeKey = message.resumeKey,
         )
+        val received = tryResumeReceive(transfer) ?: DownloadStorage.createFile(context, combinedSubDir, fileName, customDownloadFolderProvider())
+        if (received == null) {
+            onStatusChanged?.invoke("無法建立檔案。")
+            writeControl(FileControlMessage(type = "folder-cancel", transferId = session.folderTransferId))
+            abortActiveFolderSession(TransferEndReason.FAILED)
+            return
+        }
+
         transfer.outputStream = received.outputStream.buffered(RECEIVE_WRITE_BUFFER_SIZE)
         transfer.savedToken = received.token
         transfer.savedDisplayPath = received.displayPath
@@ -646,9 +677,65 @@ class PeerConnection internal constructor(
      * (傳送端等 file-complete、接收端等資料)。
      */
     private suspend fun acceptIncomingFile(transfer: ActiveTransferState) {
-        writeControl(FileControlMessage(type = "file-accept", transferId = transfer.transferId))
-        if (transfer.totalBytes == 0L && activeTransfer === transfer) {
+        writeControl(
+            FileControlMessage(
+                type = "file-accept",
+                transferId = transfer.transferId,
+                offset = transfer.transferredBytes.takeIf { it > 0 },
+            )
+        )
+        // 0 byte 的檔案,或續傳時其實已經收完了:不會再有任何 Chunk 訊框,直接完成。
+        if (transfer.transferredBytes == transfer.totalBytes && activeTransfer === transfer) {
             completeReceivedFile(transfer)
+        }
+    }
+
+    /** 接收端:同一台裝置送來的 ResumeKey 有保留下來的部分檔案,就接著寫進去(transferredBytes 從已有的大小開始)。 */
+    private fun tryResumeReceive(transfer: ActiveTransferState): DownloadStorage.ReceivedFile? {
+        if (!canResume) return null
+        val entry = resumeStore!!.find(remoteDeviceId, transfer.resumeKey) ?: return null
+        val (received, existing) = DownloadStorage.reopenForAppend(context, DownloadStorage.tokenFromString(entry.token), entry.displayPath)
+            ?: return null
+        if (existing > transfer.totalBytes) {
+            runCatching { received.outputStream.close() }
+            return null
+        }
+        transfer.transferredBytes = existing
+        onStatusChanged?.invoke("從中斷處繼續接收「${transfer.fileName}」(已有 $existing bytes)。")
+        return received
+    }
+
+    /** 傳送端:連線中斷時還沒送完的內容(沒有在傳送就是 null)。 */
+    private fun buildPendingSend(): PendingSend? {
+        val folder = activeFolderSession
+        if (folder != null && folder.direction == TransferDirection.SENDING) {
+            val current = activeTransfer?.takeIf { it.direction == TransferDirection.SENDING }
+            if (!folder.isBatch) {
+                val remaining = listOfNotNull(current?.folderEntry) + (folder.pendingFiles?.toList() ?: emptyList())
+                if (remaining.isEmpty()) return null
+                return PendingSend(folder.folderName, emptyList(), folder.folderName, remaining, folder.resumeKey)
+            }
+            val remaining = listOfNotNull(current?.folderEntry) + (folder.pendingFiles?.toList() ?: emptyList())
+            if (remaining.isEmpty()) return null
+            return PendingSend(
+                "${remaining.size} 個檔案",
+                remaining.map { Triple(it.uri, it.relativePath, it.size) },
+            )
+        }
+        val single = activeTransfer?.takeIf { it.direction == TransferDirection.SENDING } ?: return null
+        val uri = single.sourceUri ?: return null
+        return PendingSend(single.fileName, listOf(Triple(uri, single.fileName, single.totalBytes)))
+    }
+
+    /**
+     * 繼續連線中斷前沒送完的內容(見 [onTransferInterrupted])。檔案都帶著一樣的 ResumeKey,
+     * 對方保留了部分檔案的話會從中斷處接著收;資料夾已經送完的檔案不會再送。
+     */
+    fun resumeSend(pending: PendingSend) {
+        if (pending.folderName != null) {
+            sendFolder(pending.folderName, pending.folderEntries, pending.folderResumeKey)
+        } else {
+            sendFiles(pending.files)
         }
     }
 
@@ -702,6 +789,10 @@ class PeerConnection internal constructor(
     }
 
     private fun handleFileAccept(message: FileControlMessage) {
+        activeTransfer?.takeIf { it.direction == TransferDirection.SENDING && it.transferId == message.transferId }?.let {
+            // 續傳:對方已經有前面這些位元組,從這裡開始送。
+            it.transferredBytes = (message.offset ?: 0L).coerceIn(0L, it.totalBytes)
+        }
         val transfer = activeTransfer
         if (transfer == null || transfer.direction != TransferDirection.SENDING || transfer.transferId != message.transferId) return
         sendFileChunksAsync(transfer)
@@ -790,6 +881,7 @@ class PeerConnection internal constructor(
         }
         activeTransfer = null
         transfer.savedToken?.let { DownloadStorage.markComplete(contentResolver, it) }
+        resumeStore?.remove(remoteDeviceId, transfer.resumeKey)
         writeControl(FileControlMessage(type = "file-complete", transferId = transfer.transferId))
 
         val folderTransferId = transfer.folderTransferId
@@ -829,18 +921,46 @@ class PeerConnection internal constructor(
     private fun abortActiveTransfer(reason: TransferEndReason) {
         val transfer = activeTransfer ?: return
         activeTransfer = null
-        cleanupTransferResources(transfer)
+        val keptForResume = reason == TransferEndReason.CONNECTION_CLOSED && keepPartialForResume(transfer)
+        if (!keptForResume) cleanupTransferResources(transfer)
 
         if (transfer.folderTransferId != null) return // 資料夾層級的結束事件由 abortActiveFolderSession 統一觸發。
 
-        onFileTransferEnded?.invoke(FileTransferEnded(transfer.transferId, transfer.direction, reason, transfer.fileName))
+        // 傳送端:對方是新版(有 DeviceId)而且傳送內容還在,重新連線後就能續傳。
+        val resumable = keptForResume || (reason == TransferEndReason.CONNECTION_CLOSED &&
+            transfer.direction == TransferDirection.SENDING && remoteDeviceId != null && transfer.resumeKey != null)
+        onFileTransferEnded?.invoke(FileTransferEnded(transfer.transferId, transfer.direction, reason, transfer.fileName, resumable = resumable))
+    }
+
+    /**
+     * 連線中斷時接收中的檔案:能續傳(對方有 DeviceId、提議帶了 ResumeKey、已經收到一些內容)就關檔保留,
+     * 記到 [resumeStore],回傳 true;否則回傳 false,由呼叫端刪掉部分檔案。
+     */
+    private fun keepPartialForResume(transfer: ActiveTransferState): Boolean {
+        val key = transfer.resumeKey
+        val token = transfer.savedToken
+        if (transfer.direction != TransferDirection.RECEIVING || !canResume || key == null || token == null || transfer.transferredBytes <= 0) {
+            return false
+        }
+        transfer.job?.cancel()
+        if (runCatching { transfer.outputStream?.close() }.isFailure) return false
+        resumeStore!!.save(
+            ResumeEntry(remoteDeviceId!!, key, DownloadStorage.tokenToString(token), transfer.savedDisplayPath ?: transfer.fileName, System.currentTimeMillis())
+        )
+        onStatusChanged?.invoke("「${transfer.fileName}」已保留收到的 ${transfer.transferredBytes} bytes,重新連線後會從中斷處繼續。")
+        return true
     }
 
     private fun abortActiveFolderSession(reason: TransferEndReason) {
         val session = activeFolderSession ?: return
         activeFolderSession = null
+        val resumable = reason == TransferEndReason.CONNECTION_CLOSED && remoteDeviceId != null &&
+            (session.direction == TransferDirection.SENDING || canResume)
         onFolderTransferEnded?.invoke(
-            FolderTransferEnded(session.folderTransferId, session.direction, reason, session.folderName, session.completedEntries, session.isBatch)
+            FolderTransferEnded(
+                session.folderTransferId, session.direction, reason, session.folderName, session.completedEntries, session.isBatch,
+                resumable = resumable,
+            )
         )
     }
 
@@ -893,6 +1013,10 @@ class PeerConnection internal constructor(
         val sourceUri: Uri? = null,
         val folderTransferId: String? = null,
         val entryIndex: Int? = null,
+        /** 續傳識別碼(傳送端產生,見 [ResumeKeys])。 */
+        val resumeKey: String? = null,
+        /** 傳送端、資料夾傳輸:這個檔案對應的項目(中斷時要放回「還沒送完」的清單)。 */
+        val folderEntry: FolderEntry? = null,
     ) {
         var transferredBytes: Long = 0L
         var lastProgressReportAt: Long = 0L
@@ -912,6 +1036,8 @@ class PeerConnection internal constructor(
         val totalEntries: Int,
         val isBatch: Boolean,
         val pendingFiles: ArrayDeque<FolderEntry>? = null,
+        /** 續傳識別碼(資料夾傳輸才有)。 */
+        val resumeKey: String? = null,
     ) {
         var completedBytes: Long = 0L
         var completedEntries: Int = 0

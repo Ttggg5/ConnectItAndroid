@@ -100,6 +100,8 @@ data class FileTransferEnded(
     /** 接收成功時檔案的 content:// Uri 字串(MediaStore 或 SAF 文件),供「開啟檔案」使用;
      * 舊版 Android(API 28 以下)直接寫檔案路徑的情況為 null。 */
     val savedUri: String? = null,
+    /** 因為連線中斷而結束,但已經保留了續傳需要的資料:同一台裝置重新連線後可以從中斷處繼續。 */
+    val resumable: Boolean = false,
 )
 
 data class FolderTransferEnded(
@@ -110,6 +112,8 @@ data class FolderTransferEnded(
     val entryCount: Int,
     val isBatch: Boolean,
     val savedFolderPath: String? = null,
+    /** 因為連線中斷而結束,但已經保留了續傳需要的資料:同一台裝置重新連線後可以從中斷處繼續。 */
+    val resumable: Boolean = false,
 )
 
 /** 已連線的對象。 */

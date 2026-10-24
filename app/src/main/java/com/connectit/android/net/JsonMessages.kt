@@ -63,6 +63,10 @@ data class FileControlMessage(
     val entryIndex: Int? = null,
     val totalEntries: Int? = null,
     val isBatch: Boolean? = null,
+    /** file-offer/folder-offer:傳送端產生的續傳識別碼(見 ResumeKeys),同一台裝置重連後相同就從中斷處繼續。 */
+    val resumeKey: String? = null,
+    /** file-accept:接收端已經有的位元組數,傳送端從這裡開始送(續傳);沒有或 0 代表從頭開始。 */
+    val offset: Long? = null,
 ) {
     fun toJson(): ByteArray {
         val obj = JSONObject()
@@ -75,6 +79,8 @@ data class FileControlMessage(
         if (entryIndex != null) obj.put("EntryIndex", entryIndex)
         if (totalEntries != null) obj.put("TotalEntries", totalEntries)
         if (isBatch != null) obj.put("IsBatch", isBatch)
+        if (resumeKey != null) obj.put("ResumeKey", resumeKey)
+        if (offset != null) obj.put("Offset", offset)
         return obj.toString().toByteArray(Charsets.UTF_8)
     }
 
@@ -91,6 +97,8 @@ data class FileControlMessage(
                 entryIndex = if (obj.has("EntryIndex") && !obj.isNull("EntryIndex")) obj.getInt("EntryIndex") else null,
                 totalEntries = if (obj.has("TotalEntries") && !obj.isNull("TotalEntries")) obj.getInt("TotalEntries") else null,
                 isBatch = if (obj.has("IsBatch") && !obj.isNull("IsBatch")) obj.getBoolean("IsBatch") else null,
+                resumeKey = obj.optStringOrNull("ResumeKey"),
+                offset = if (obj.has("Offset") && !obj.isNull("Offset")) obj.getLong("Offset") else null,
             )
         }.getOrNull()
     }
