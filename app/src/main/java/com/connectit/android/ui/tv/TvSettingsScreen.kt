@@ -121,6 +121,13 @@ fun TvSettingsScreen(service: ConnectItService) {
                 "信任的裝置送出連線請求時會直接自動接受,不再跳出確認對話框。",
                 style = MaterialTheme.typography.bodySmall,
             )
+            // TV 用遙控器操作,沒有另外跳確認對話框:說明直接寫在開關底下。
+            SwitchRow(
+                title = "無人值守存取",
+                subtitle = "開啟後,打開「免確認操控」的信任裝置要看螢幕/操控時會自動同意(系統仍會要求按一次「開始」才能擷取螢幕)。分享期間通知會一直顯示,可隨時中斷;關掉立刻撤銷。只對你自己的或完全信任的裝置開啟。",
+                checked = settings.unattendedAccessEnabled,
+                onCheckedChange = { scope.launch { service.settingsRepository.setUnattendedAccessEnabled(it) } },
+            )
             if (settings.trustedDevices.isEmpty()) {
                 Text("目前沒有信任的裝置(可在收到連線請求時勾選「信任此裝置」加入)。", style = MaterialTheme.typography.bodySmall)
             } else {
@@ -130,7 +137,13 @@ fun TvSettingsScreen(service: ConnectItService) {
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(device.name)
+                        Text(device.name, modifier = Modifier.weight(1f))
+                        Text("免確認操控", style = MaterialTheme.typography.bodySmall)
+                        Switch(
+                            checked = device.allowUnattended,
+                            onCheckedChange = { allow -> scope.launch { service.settingsRepository.setDeviceAllowUnattended(device.fingerprint, allow) } },
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                        )
                         IconButton(onClick = { scope.launch { service.settingsRepository.untrustDevice(device.fingerprint) } }) {
                             Icon(Icons.Filled.Close, contentDescription = "移除信任")
                         }

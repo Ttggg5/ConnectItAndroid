@@ -21,8 +21,11 @@ import kotlinx.coroutines.flow.map
 
 enum class AppThemeMode { LIGHT, DARK, AUTO }
 
-/** 信任清單裡的一台裝置。[name] 只是顯示用,比對一律用 [fingerprint](對方 TLS 憑證的指紋)。 */
-data class TrustedDevice(val fingerprint: String, val name: String, val deviceId: String?)
+/**
+ * 信任清單裡的一台裝置。[name] 只是顯示用,比對一律用 [fingerprint](對方 TLS 憑證的指紋)。
+ * [allowUnattended]:這台裝置要看螢幕/操控時免確認(還要總開關 [AppSettings.unattendedAccessEnabled] 有開)。
+ */
+data class TrustedDevice(val fingerprint: String, val name: String, val deviceId: String?, val allowUnattended: Boolean = false)
 
 data class AppSettings(
     val deviceName: String,
@@ -33,6 +36,9 @@ data class AppSettings(
      * 收到這些裝置的連線請求時不再跳出確認對話框,直接自動接受。只認憑證指紋,改名或冒名都不會被自動接受;
      * 舊版只存名稱(trusted_device_names),沒辦法換算成指紋,升級後需要重新配對一次。 */
     val trustedDevices: List<TrustedDevice> = emptyList(),
+    /** 無人值守存取的總開關(對應 Windows 端 TrustedDevicesService.UnattendedEnabled):有開、而且那台信任裝置也
+     * 勾了 [TrustedDevice.allowUnattended],對方要看螢幕/操控時就不跳確認對話框。關掉立刻撤銷,個別勾選保留。 */
+    val unattendedAccessEnabled: Boolean = false,
     /** 使用者透過 SAF 選取的自訂接收資料夾(content:// tree Uri 字串),null 代表使用預設的
      * 公用 Download/ConnectIt 資料夾。 */
     val customDownloadFolderUri: String? = null,
@@ -56,6 +62,11 @@ data class AppSettings(
      * 實際值由 [SettingsRepository.settings] 依儲存的內容決定(沒存過就是 false)。 */
     val onboardingCompleted: Boolean = true,
 ) {
+    /** 這台裝置要看螢幕/操控時能不能免確認:總開關有開、是信任裝置、而且個別允許了。 */
+    fun isUnattendedAllowed(fingerprint: String?): Boolean =
+        unattendedAccessEnabled && !fingerprint.isNullOrBlank() &&
+            trustedDevices.any { it.allowUnattended && it.fingerprint.equals(fingerprint, ignoreCase = true) }
+
     companion object {
         const val DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
         const val MIN_CONNECT_TIMEOUT_SECONDS = 3
@@ -78,6 +89,7 @@ class SettingsRepository(private val context: Context) {
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val NOTIFICATIONS_ENABLED = booleanPreferencesKey("notifications_enabled")
         val TRUSTED_DEVICES_V2 = stringPreferencesKey("trusted_devices_v2")
+        val UNATTENDED_ACCESS_ENABLED = booleanPreferencesKey("unattended_access_enabled")
         val CUSTOM_DOWNLOAD_FOLDER_URI = stringPreferencesKey("custom_download_folder_uri")
         val CONNECT_TIMEOUT_SECONDS = intPreferencesKey("connect_timeout_seconds")
         val PREFERRED_PORT = intPreferencesKey("preferred_port")
@@ -98,6 +110,7 @@ class SettingsRepository(private val context: Context) {
             themeMode = prefs[Keys.THEME_MODE]?.let { runCatching { AppThemeMode.valueOf(it) }.getOrNull() } ?: AppThemeMode.AUTO,
             notificationsEnabled = prefs[Keys.NOTIFICATIONS_ENABLED] ?: true,
             trustedDevices = parseTrustedDevices(prefs[Keys.TRUSTED_DEVICES_V2]),
+            unattendedAccessEnabled = prefs[Keys.UNATTENDED_ACCESS_ENABLED] ?: false,
             customDownloadFolderUri = prefs[Keys.CUSTOM_DOWNLOAD_FOLDER_URI],
             connectTimeoutSeconds = (prefs[Keys.CONNECT_TIMEOUT_SECONDS] ?: AppSettings.DEFAULT_CONNECT_TIMEOUT_SECONDS)
                 .coerceIn(AppSettings.MIN_CONNECT_TIMEOUT_SECONDS, AppSettings.MAX_CONNECT_TIMEOUT_SECONDS),
@@ -128,14 +141,24 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit { it[Keys.NOTIFICATIONS_ENABLED] = enabled }
     }
 
-    /** 加入(或更新)一台信任裝置;同一台裝置(相同指紋或相同 DeviceId)只留最新的一筆。 */
+    /** 加入(或更新)一台信任裝置,規則見 [withTrusted]。 */
     suspend fun trustDevice(fingerprint: String, name: String, deviceId: String?) {
         if (fingerprint.isBlank()) return
         context.dataStore.edit { prefs ->
-            val kept = parseTrustedDevices(prefs[Keys.TRUSTED_DEVICES_V2]).filterNot {
-                it.fingerprint.equals(fingerprint, ignoreCase = true) || (deviceId != null && it.deviceId == deviceId)
+            prefs[Keys.TRUSTED_DEVICES_V2] = encodeTrustedDevices(withTrusted(parseTrustedDevices(prefs[Keys.TRUSTED_DEVICES_V2]), fingerprint, name, deviceId))
+        }
+    }
+
+    suspend fun setUnattendedAccessEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.UNATTENDED_ACCESS_ENABLED] = enabled }
+    }
+
+    suspend fun setDeviceAllowUnattended(fingerprint: String, allow: Boolean) {
+        context.dataStore.edit { prefs ->
+            val devices = parseTrustedDevices(prefs[Keys.TRUSTED_DEVICES_V2]).map {
+                if (it.fingerprint.equals(fingerprint, ignoreCase = true)) it.copy(allowUnattended = allow) else it
             }
-            prefs[Keys.TRUSTED_DEVICES_V2] = encodeTrustedDevices(kept + TrustedDevice(fingerprint, name, deviceId))
+            prefs[Keys.TRUSTED_DEVICES_V2] = encodeTrustedDevices(devices)
         }
     }
 
@@ -212,7 +235,19 @@ class SettingsRepository(private val context: Context) {
     fun defaultDeviceName(): String = Build.MODEL ?: "Android"
 
     companion object {
-        /** 信任清單存成 JSON 陣列字串:[{"Fingerprint":..,"Name":..,"DeviceId":..}],欄位名稱跟 Windows 端一致。 */
+        /**
+         * 同一台裝置(相同指紋或相同 DeviceId)只留最新的一筆。指紋相同時沿用原本的無人值守設定;
+         * 指紋換了(換了金鑰)就要重新允許,不能沿用。
+         */
+        internal fun withTrusted(devices: List<TrustedDevice>, fingerprint: String, name: String, deviceId: String?): List<TrustedDevice> {
+            val allowUnattended = devices.any { it.allowUnattended && it.fingerprint.equals(fingerprint, ignoreCase = true) }
+            val kept = devices.filterNot {
+                it.fingerprint.equals(fingerprint, ignoreCase = true) || (deviceId != null && it.deviceId == deviceId)
+            }
+            return kept + TrustedDevice(fingerprint, name, deviceId, allowUnattended)
+        }
+
+        /** 信任清單存成 JSON 陣列字串:[{"Fingerprint":..,"Name":..,"DeviceId":..,"AllowUnattended":..}],欄位名稱跟 Windows 端一致。 */
         internal fun parseTrustedDevices(json: String?): List<TrustedDevice> {
             if (json.isNullOrBlank()) return emptyList()
             return runCatching {
@@ -224,6 +259,7 @@ class SettingsRepository(private val context: Context) {
                         fingerprint = fingerprint,
                         name = obj.optString("Name"),
                         deviceId = if (obj.isNull("DeviceId")) null else obj.optString("DeviceId").takeIf { it.isNotBlank() },
+                        allowUnattended = obj.optBoolean("AllowUnattended", false),
                     )
                 }
             }.getOrDefault(emptyList())
@@ -237,6 +273,7 @@ class SettingsRepository(private val context: Context) {
                         put("Fingerprint", device.fingerprint)
                         put("Name", device.name)
                         put("DeviceId", device.deviceId ?: JSONObject.NULL)
+                        put("AllowUnattended", device.allowUnattended)
                     }
                 )
             }

@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.WavingHand
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -54,6 +55,7 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -238,6 +240,34 @@ fun SettingsScreen(
                 icon = Icons.Filled.VerifiedUser,
                 description = "信任的裝置送出連線請求時會自動接受,不再跳出確認視窗。只認裝置本身的加密金鑰,改名或冒名都不會被自動接受;舊版的信任紀錄需要重新配對一次。",
             ) {
+                var confirmUnattended by remember { mutableStateOf(false) }
+                SwitchRow(
+                    title = "無人值守存取",
+                    description = "開啟後,下方打開「免確認操控」的裝置要看螢幕/操控時會自動同意。Android 每次仍需要在系統畫面按一次「開始」才能擷取螢幕;分享期間通知列會一直顯示,可隨時中斷。關掉會立刻撤銷。",
+                    checked = settings.unattendedAccessEnabled,
+                    onCheckedChange = { enabled ->
+                        if (enabled) confirmUnattended = true else scope.launch { repo.setUnattendedAccessEnabled(false) }
+                    },
+                )
+                if (confirmUnattended) {
+                    AlertDialog(
+                        onDismissRequest = { confirmUnattended = false },
+                        title = { Text("允許免確認遠端操控?") },
+                        text = {
+                            Text(
+                                "開啟後,你允許的信任裝置可以直接觀看並操控這台裝置,不需要先在 App 裡按同意。" +
+                                    "分享期間通知列會一直顯示,可以隨時按「中斷」或回到這裡關閉。只在你確定這些裝置都是你自己的、或完全信任的人時才開啟。",
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                confirmUnattended = false
+                                scope.launch { repo.setUnattendedAccessEnabled(true) }
+                            }) { Text("開啟") }
+                        },
+                        dismissButton = { TextButton(onClick = { confirmUnattended = false }) { Text("取消") } },
+                    )
+                }
                 if (settings.trustedDevices.isEmpty()) {
                     Text(
                         "目前沒有信任的裝置。收到連線請求時勾選「信任此裝置」即可加入。",
@@ -256,6 +286,12 @@ fun SettingsScreen(
                                     Icon(Icons.Filled.Devices, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(10.dp))
                                     Text(device.name, modifier = Modifier.weight(1f))
+                                    Text("免確認操控", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Spacer(Modifier.width(6.dp))
+                                    Switch(
+                                        checked = device.allowUnattended,
+                                        onCheckedChange = { allow -> scope.launch { repo.setDeviceAllowUnattended(device.fingerprint, allow) } },
+                                    )
                                     IconButton(onClick = { scope.launch { repo.untrustDevice(device.fingerprint) } }) {
                                         Icon(Icons.Filled.Close, contentDescription = "取消信任")
                                     }

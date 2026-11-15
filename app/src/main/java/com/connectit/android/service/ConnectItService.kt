@@ -48,6 +48,8 @@ import com.connectit.android.repo.SettingsRepository
 import com.connectit.android.screen.ScreenMirrorController
 import com.connectit.android.screen.RemoteControlController
 import com.connectit.android.screen.RemoteControlPhase
+import com.connectit.android.screen.ProjectionPurpose
+import com.connectit.android.screen.ScreenAudioFormat
 import com.connectit.android.screen.ScreenMirrorState
 import com.connectit.android.update.AppUpdater
 import com.connectit.android.util.DownloadStorage
@@ -269,6 +271,16 @@ class ConnectItService : LifecycleService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        if (intent?.action == ACTION_STOP_SCREEN_SHARE) {
+            // 分享中常駐通知上的「中斷」。
+            screenMirror.stop()
+            return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_REVOKE_UNATTENDED) {
+            // 常駐通知上的「關閉無人值守」:關掉總開關,設定收集器看到後會中斷進行中的免確認工作階段。
+            lifecycleScope.launch { settingsRepository.setUnattendedAccessEnabled(false) }
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_STOP) {
             // 使用者從通知直接按下「關閉」:除了把服務從前景/通知移除掉並結束它之外,還要通知
             // MainActivity(如果當下開著)把畫面也收掉——否則 Service 只要還被 Activity 綁定著
@@ -332,6 +344,7 @@ class ConnectItService : LifecycleService() {
             settingsRepository.settings.collect { settings ->
                 cachedSettings = settings
                 connectionEngine.connectTimeoutMs = settings.connectTimeoutSeconds * 1000
+                enforceUnattendedRevocation()
             }
         }
 
@@ -800,19 +813,88 @@ class ConnectItService : LifecycleService() {
             .onFailure { pushLog("無法更新前景服務類型:${it.message}") }
     }
 
-    /** 對方想看我的螢幕/想分享螢幕給我時,App 在背景的話跳通知提醒使用者回來處理。 */
+    /** 無人值守存取(免確認)自動同意的那個工作階段;撤銷授權時只強制中斷這種的。 */
+    @Volatile private var unattendedSessionId: String? = null
+
+    /** 這台裝置的主人有沒有允許 [peer] 免確認觀看/操控(見 [AppSettings.isUnattendedAllowed])。 */
+    fun isUnattendedAllowed(peer: PeerConnection?): Boolean = cachedSettings.isUnattendedAllowed(peer?.remoteFingerprint)
+
+    /**
+     * 對方想看我的螢幕/想分享螢幕給我時,App 在背景的話跳通知提醒使用者回來處理;
+     * 無人值守的裝置則直接同意。分享中一直掛著一則常駐通知,讓主人隨時知道、隨時可以中斷。
+     */
     private fun observeScreenMirror() {
         lifecycleScope.launch {
             screenMirror.state.collect { state ->
                 val peerName = screenMirror.peer?.name ?: getString(R.string.notification_incoming_transfer_unknown_peer)
+                val notifications = NotificationManagerCompat.from(this@ConnectItService)
+                if (state !is ScreenMirrorState.Sharing) notifications.cancel(SHARING_INDICATOR_NOTIFICATION_ID)
+                if (state == ScreenMirrorState.Idle) unattendedSessionId = null
                 when (state) {
-                    is ScreenMirrorState.IncomingRequest -> notifyScreenMirrorRequest("$peerName 想要觀看你的螢幕")
+                    is ScreenMirrorState.IncomingRequest -> if (isUnattendedAllowed(screenMirror.peer)) {
+                        unattendedSessionId = state.sessionId
+                        pushLog("無人值守存取:已自動同意「$peerName」觀看並操控這台裝置。")
+                        screenMirror.respondToIncomingRequest(true, allowControl = true, shareAudio = ScreenAudioFormat.captureSupported)
+                    } else {
+                        notifyScreenMirrorRequest("$peerName 想要觀看你的螢幕")
+                    }
                     is ScreenMirrorState.IncomingOffer -> notifyScreenMirrorRequest("$peerName 想要分享螢幕給你")
-                    else -> NotificationManagerCompat.from(this@ConnectItService).cancel(SCREEN_MIRROR_NOTIFICATION_ID)
+                    // Android 規定每次擷取螢幕都要在系統的「開始錄製或投放」畫面按一次同意,App 沒辦法代按;
+                    // App 在前景時 ScreenMirrorHost 會直接跳出來,在背景時就靠這則通知把使用者帶回來。
+                    is ScreenMirrorState.AwaitingProjection ->
+                        if (state.purpose == ProjectionPurpose.ACCEPT_REQUEST && state.sessionId == unattendedSessionId) {
+                            notifyScreenMirrorRequest("$peerName 正在無人值守連入", "Android 需要你按一次「開始」才能分享螢幕,點這裡繼續。")
+                        } else {
+                            notifications.cancel(SCREEN_MIRROR_NOTIFICATION_ID)
+                        }
+                    is ScreenMirrorState.Sharing -> {
+                        notifications.cancel(SCREEN_MIRROR_NOTIFICATION_ID)
+                        notifySharingIndicator(peerName, state, unattended = state.sessionId == unattendedSessionId)
+                    }
+                    else -> notifications.cancel(SCREEN_MIRROR_NOTIFICATION_ID)
                 }
             }
         }
     }
+
+    /** 設定變了:正在進行的免確認工作階段如果已經不再被允許(關了總開關、取消勾選、取消信任),立刻中斷。 */
+    private fun enforceUnattendedRevocation() {
+        val sessionId = unattendedSessionId ?: return
+        if (isUnattendedAllowed(screenMirror.peer)) return
+        when (val state = screenMirror.state.value) {
+            is ScreenMirrorState.Sharing -> if (state.sessionId == sessionId) {
+                screenMirror.stop()
+                pushEvent("已撤銷無人值守存取,目前的遠端操控已中斷。")
+            }
+            is ScreenMirrorState.AwaitingProjection -> if (state.sessionId == sessionId) screenMirror.cancelOutgoing()
+            else -> Unit
+        }
+    }
+
+    /** 分享中的常駐通知:誰在看、能不能操控、是不是免確認進來的,附「中斷」(與「關閉無人值守」)。 */
+    private fun notifySharingIndicator(peerName: String, state: ScreenMirrorState.Sharing, unattended: Boolean) {
+        val title = if (state.controlActive) "「$peerName」正在操控這台裝置" else "「$peerName」正在觀看這台裝置的螢幕"
+        val text = if (unattended) "無人值守存取(免確認連入)。隨時可以按「中斷」。" else "隨時可以按「中斷」停止分享。"
+        val builder = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(mainActivityIntent())
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .addAction(R.drawable.ic_notification, "中斷", serviceActionIntent(ACTION_STOP_SCREEN_SHARE, 1))
+        if (unattended) {
+            builder.addAction(R.drawable.ic_notification, "關閉無人值守", serviceActionIntent(ACTION_REVOKE_UNATTENDED, 2))
+        }
+        postAlertNotification(SHARING_INDICATOR_NOTIFICATION_ID, builder.build())
+    }
+
+    private fun serviceActionIntent(action: String, requestCode: Int): PendingIntent = PendingIntent.getService(
+        this, requestCode, Intent(this, ConnectItService::class.java).setAction(action),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
 
     /** 對方想遙控這台裝置時,App 在背景的話跳通知提醒使用者回來處理。 */
     private fun observeRemoteControl() {
@@ -828,10 +910,10 @@ class ConnectItService : LifecycleService() {
         }
     }
 
-    private fun notifyScreenMirrorRequest(title: String) {
+    private fun notifyScreenMirrorRequest(title: String, text: String = getString(R.string.notification_connection_request_text)) {
         val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
             .setContentTitle(title)
-            .setContentText(getString(R.string.notification_connection_request_text))
+            .setContentText(text)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(mainActivityIntent())
             .setAutoCancel(true)
@@ -1268,6 +1350,8 @@ class ConnectItService : LifecycleService() {
     companion object {
         /** 通知上「關閉」按鈕送出的 Intent action,見 [onStartCommand]。 */
         const val ACTION_STOP = "com.connectit.android.service.ACTION_STOP"
+        private const val ACTION_STOP_SCREEN_SHARE = "com.connectit.android.service.ACTION_STOP_SCREEN_SHARE"
+        private const val ACTION_REVOKE_UNATTENDED = "com.connectit.android.service.ACTION_REVOKE_UNATTENDED"
 
         private const val CHANNEL_ID = "connectit_service"
         private const val NOTIFICATION_ID = 1
@@ -1284,6 +1368,7 @@ class ConnectItService : LifecycleService() {
         private const val PROGRESS_NOTIFICATION_INTERVAL_MS = 500L
         private const val SCREEN_MIRROR_NOTIFICATION_ID = 7
         private const val UPDATE_AVAILABLE_NOTIFICATION_ID = 8
+        private const val SHARING_INDICATOR_NOTIFICATION_ID = 9
         private const val STARTUP_UPDATE_CHECK_DELAY_MS = 8_000L
     }
 }

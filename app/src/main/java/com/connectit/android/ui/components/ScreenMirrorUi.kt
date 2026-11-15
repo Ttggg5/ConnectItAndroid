@@ -123,7 +123,8 @@ fun ScreenMirrorHost(service: ConnectItService) {
     }
 
     when (val current = state) {
-        is ScreenMirrorState.IncomingRequest -> IncomingScreenRequestDialog(
+        // 無人值守的裝置由服務直接同意(見 ConnectItService.observeScreenMirror),不要閃一下確認對話框。
+        is ScreenMirrorState.IncomingRequest -> if (!service.isUnattendedAllowed(controller.peer)) IncomingScreenRequestDialog(
             peerName = peerName,
             onRespond = { accept, allowControl, shareAudio -> controller.respondToIncomingRequest(accept, allowControl, shareAudio) },
         )
